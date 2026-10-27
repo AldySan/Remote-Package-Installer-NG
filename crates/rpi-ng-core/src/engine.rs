@@ -688,19 +688,20 @@ impl EngineInner {
 
     /// Re-register an item's parts with the file server and return their URLs
     /// in install order.
+    ///
+    /// Part ids are *server-scoped*: a fresh server (new connect, restart)
+    /// starts counting from zero again, while a restored queue may carry ids
+    /// from an earlier server. The registration id the server hands back is
+    /// therefore written back into the queue — building URLs from stale ids
+    /// would silently stall the queue (`url_for` would miss).
     fn rebuild_urls(&mut self, item: ItemId) -> Option<Vec<String>> {
         let server = self.server.clone()?;
-        let parts: Vec<(PartId, PathBuf, String)> = self
-            .queue
-            .get(item)?
-            .parts
-            .iter()
-            .map(|p| (p.id, p.path.clone(), p.file_name.clone()))
-            .collect();
-        let mut urls = Vec::with_capacity(parts.len());
-        for (pid, path, name) in parts {
-            server.register(path, Some(name));
-            urls.push(server.url_for(pid)?);
+        let queue_item = self.queue.get_mut(item)?;
+        let mut urls = Vec::with_capacity(queue_item.parts.len());
+        for part in &mut queue_item.parts {
+            let id = server.register(part.path.clone(), Some(part.file_name.clone()));
+            part.id = id;
+            urls.push(server.url_for(id)?);
         }
         Some(urls)
     }

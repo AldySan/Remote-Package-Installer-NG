@@ -715,3 +715,116 @@ async fn engine_marks_failed_on_console_error() {
     );
     handle.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Restart / recovery regressions
+// ---------------------------------------------------------------------------
+
+/// A queue restored from disk can hold part ids that do not line up with a
+/// fresh file server's registry (the server starts counting from zero again
+/// after a restart). Submission must re-register the parts and use the ids
+/// the *server* handed back, or `url_for` silently fails and the queue stalls.
+#[tokio::test]
+async fn engine_submits_restored_queue_with_unaligned_part_ids() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA09999_00-RESTOREDPKG00000.pkg",
+        "UP0001-CUSA09999_00-RESTOREDPKG00000",
+    );
+    let size = std::fs::metadata(&pkg_path).unwrap().len();
+
+    // Simulate a queue that had prior activity: part ids start at 7, well
+    // past anything a fresh file-server registry would hand out.
+    let doc = serde_json::json!({
+        "next_item": 5,
+        "next_part": 8,
+        "items": [{
+            "id": 4,
+            "parts": [{
+                "id": 7,
+                "path": pkg_path.to_string_lossy(),
+                "file_name": "UP0001-CUSA09999_00-RESTOREDPKG00000.pkg",
+                "size": size,
+                "part_index": null,
+                "pkg": null,
+                "invalid_reason": null,
+            }],
+            "state": "Queued",
+            "error": null,
+            "task_id": null,
+            "console_title": null,
+            "progress": null,
+            "attempts": 0,
+            "added_at": 1,
+            "updated_at": 1,
+        }],
+    });
+    std::fs::write(
+        data_dir.path().join("queue.json"),
+        serde_json::to_string_pretty(&doc).unwrap(),
+    )
+    .unwrap();
+
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // The restored item is already in that snapshot, queued.
+    assert!(
+        snap.items.iter().any(|i| i.state == ItemState::Queued),
+        "restored queue must contain the pending item"
+    );
+    let item_id = snap
+        .items
+        .iter()
+        .find(|i| i.state == ItemState::Queued)
+        .unwrap()
+        .id;
+
+    handle.send(Command::Start);
+
+    // With the bug this stalls forever (url_for misses, no log, no state
+    // change); the fix must complete the install end to end.
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Completed)
+        },
+        Duration::from_secs(20),
+    )
+    .await;
+    let item = snap.items.iter().find(|i| i.id == item_id).unwrap();
+    assert_eq!(item.progress.unwrap().percent, 100.0);
+    assert_eq!(mock.installs().len(), 1);
+
+    // And the queue document now carries the server-scoped part id.
+    let text = std::fs::read_to_string(data_dir.path().join("queue.json")).unwrap();
+    let q = rpi_ng_core::queue::Queue::from_json(&text).unwrap();
+    assert_eq!(
+        q.items()[0].parts[0].id,
+        0,
+        "part id must be the server registration"
+    );
+    handle.shutdown();
+}
