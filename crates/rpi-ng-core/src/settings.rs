@@ -125,13 +125,23 @@ impl From<SettingsDoc> for Settings {
 }
 
 /// Where settings/queue documents live (per-OS user data dir).
+/// Overridable with `RPI_NG_DATA_DIR` (used by tests and headless runs).
 pub fn data_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("RPI_NG_DATA_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
     directories::ProjectDirs::from("", "", "rpi-ng").map(|d| d.data_dir().to_path_buf())
 }
 
 impl Settings {
     pub fn load() -> Self {
-        let Some(dir) = data_dir() else {
+        Self::load_in(data_dir().as_deref())
+    }
+
+    pub fn load_in(dir: Option<&std::path::Path>) -> Self {
+        let Some(dir) = dir else {
             return Self::default();
         };
         let path = dir.join("settings.json");
@@ -148,10 +158,14 @@ impl Settings {
     /// Atomic write: serialize → write tmp → fsync → rename over destination,
     /// keeping a `.bak` of the previous file.
     pub fn save(&self) -> std::io::Result<()> {
-        let Some(dir) = data_dir() else {
+        self.save_in(data_dir().as_deref())
+    }
+
+    pub fn save_in(&self, dir: Option<&std::path::Path>) -> std::io::Result<()> {
+        let Some(dir) = dir else {
             return Ok(());
         };
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir)?;
         let path = dir.join("settings.json");
         if path.exists() {
             let _ = std::fs::copy(&path, dir.join("settings.json.bak"));

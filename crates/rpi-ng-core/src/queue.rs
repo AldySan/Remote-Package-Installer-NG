@@ -35,7 +35,12 @@ pub struct Queue {
 
 impl Queue {
     pub fn load() -> Self {
-        let Some(dir) = data_dir() else {
+        Self::load_in(crate::settings::data_dir().as_deref())
+    }
+
+    /// Load from `dir` (or the global data dir when `None`).
+    pub fn load_in(dir: Option<&std::path::Path>) -> Self {
+        let Some(dir) = dir else {
             return Self::default();
         };
         for candidate in [dir.join(QUEUE_FILE), dir.join(QUEUE_BAK)] {
@@ -46,6 +51,13 @@ impl Queue {
             }
         }
         Self::default()
+    }
+
+    /// Load from a JSON document (test/inspection entry point; applies the
+    /// same recovery mapping as [`Queue::load`]).
+    pub fn from_json(text: &str) -> Result<Self, QueueError> {
+        let doc = serde_json::from_str::<QueueDoc>(text)?;
+        Ok(Self::from_doc(doc))
     }
 
     fn from_doc(doc: QueueDoc) -> Self {
@@ -79,10 +91,14 @@ impl Queue {
     }
 
     pub fn save(&self) -> Result<(), QueueError> {
-        let Some(dir) = data_dir() else {
+        self.save_in(crate::settings::data_dir().as_deref())
+    }
+
+    pub fn save_in(&self, dir: Option<&std::path::Path>) -> Result<(), QueueError> {
+        let Some(dir) = dir else {
             return Ok(());
         };
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir)?;
         let path = dir.join(QUEUE_FILE);
         if path.exists() {
             let _ = std::fs::copy(&path, dir.join(QUEUE_BAK));

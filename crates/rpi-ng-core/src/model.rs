@@ -208,11 +208,13 @@ pub struct PkgInfo {
 
 impl PkgInfo {
     /// Derive the title id from a content id like
-    /// `UP0001-CUSA03041_00-REDEMPTION000002` (middle dash-delimited field).
+    /// `UP0001-CUSA03041_00-REDEMPTION000002` (second dash-delimited field,
+    /// truncated at the `_` suffix; 9 characters by format).
     pub fn title_id_from_content_id(content_id: &str) -> Option<String> {
         let mut parts = content_id.split('-');
         let _service = parts.next()?;
         let title = parts.next()?;
+        let title = title.split('_').next().unwrap_or(title);
         if title.is_empty() {
             return None;
         }

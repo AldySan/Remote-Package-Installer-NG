@@ -77,15 +77,34 @@ impl EngineHandle {
     }
 
     /// Deterministic shutdown: cancels work, stops the server, flushes state,
-    /// drops the runtime.
+    /// then drops the runtime. Blocks until the engine is fully stopped.
+    ///
+    /// Safe to call from any thread (GUI main thread, test harness, async
+    /// context) — the runtime is shut down on a dedicated thread because
+    /// dropping a tokio runtime inside an async context panics.
     pub fn shutdown(self) {
         let _ = self.cmd_tx.send(Command::Shutdown);
-        self.runtime.shutdown_timeout(Duration::from_secs(5));
+        let runtime = self.runtime;
+        let handle = std::thread::Builder::new()
+            .name("rpi-ng-shutdown".into())
+            .spawn(move || {
+                runtime.shutdown_timeout(Duration::from_secs(5));
+            });
+        if let Ok(h) = handle {
+            let _ = h.join();
+        }
     }
 }
 
-/// Spawn the engine with the given settings.
+/// Spawn the engine with the given settings (persisting under the default
+/// user data dir).
 pub fn spawn(settings: Settings) -> EngineHandle {
+    spawn_with(settings, None)
+}
+
+/// Spawn the engine with an explicit data directory (used by tests and
+/// headless embedding; `None` = default user data dir).
+pub fn spawn_with(settings: Settings, data_dir: Option<PathBuf>) -> EngineHandle {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -95,9 +114,10 @@ pub fn spawn(settings: Settings) -> EngineHandle {
     let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Event>();
 
     let settings = Arc::new(Mutex::new(settings));
+    let data_dir = Arc::new(data_dir);
     runtime.spawn(async move {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
-        let mut inner = EngineInner::new(settings.clone(), evt_tx, internal_tx);
+        let mut inner = EngineInner::new(settings.clone(), evt_tx, internal_tx, data_dir.clone());
         let mut cmd_rx = cmd_rx;
         loop {
             tokio::select! {
@@ -160,6 +180,7 @@ struct ActiveTask {
 
 struct EngineInner {
     settings: Arc<Mutex<Settings>>,
+    data_dir: Arc<Option<PathBuf>>,
     evt: std::sync::mpsc::Sender<Event>,
     internal_tx: mpsc::UnboundedSender<Internal>,
     queue: Queue,
@@ -186,12 +207,15 @@ impl EngineInner {
         settings: Arc<Mutex<Settings>>,
         evt: std::sync::mpsc::Sender<Event>,
         internal_tx: mpsc::UnboundedSender<Internal>,
+        data_dir: Arc<Option<PathBuf>>,
     ) -> Self {
+        let queue = Queue::load_in(data_dir.as_deref());
         Self {
             settings,
+            data_dir,
             evt,
             internal_tx,
-            queue: Queue::load(),
+            queue,
             console: None,
             console_status: ConsoleStatus::None,
             client: None,
@@ -229,7 +253,7 @@ impl EngineInner {
     }
 
     fn persist_queue(&mut self) {
-        if let Err(e) = self.queue.save() {
+        if let Err(e) = self.queue.save_in(self.data_dir.as_deref()) {
             self.log(LogLevel::Error, format!("queue save failed: {e}"));
         }
     }
@@ -887,7 +911,7 @@ impl EngineInner {
         if s.remembered.len() > 8 {
             s.remembered.truncate(8);
         }
-        let _ = s.save();
+        let _ = s.save_in(self.data_dir.as_deref());
     }
 
     /// Start (or restart) the file server on an interface that can reach the

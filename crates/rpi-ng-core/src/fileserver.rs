@@ -36,6 +36,26 @@ use tokio_util::io::ReaderStream;
 
 use crate::model::PartId;
 
+/// Percent-encode set for URL path segments: keep RFC 3986 `pchar` unreserved
+/// and sub-delims literal (letters, digits, `-._~!$&'()*+,;=:@`), encode the
+/// rest. Spaces and specials must be encoded — console installs break on them
+/// (pkg-sender issue #6, `docs/RESEARCH.md` §2.3).
+const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'|');
+
 /// Concurrency note: the console opens only a handful of connections
 /// (prerequisite fetches + the BGFT download), so no artificial open-file gate
 /// is imposed; the allowlist bounds exposure to registered files.
@@ -72,7 +92,7 @@ impl FileServer {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
         let app = Router::new()
-            .route("/pkg/{id}/{name}", get(serve).head(serve))
+            .route("/pkg/{id}/{name}", get(serve_with_name).head(serve_with_name))
             .route("/pkg/{id}", get(serve).head(serve))
             .with_state(Arc::clone(&registry));
 
@@ -116,9 +136,7 @@ impl FileServer {
     pub fn url_for(&self, id: PartId) -> Option<String> {
         let reg = self.registry.lock().unwrap();
         let (_, name) = reg.entries.get(&id)?.clone();
-        let encoded =
-            percent_encoding::utf8_percent_encode(&name, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
+        let encoded = percent_encoding::utf8_percent_encode(&name, SEGMENT).to_string();
         Some(format!("{}/pkg/{id}/{encoded}", self.base_url))
     }
 
@@ -140,15 +158,32 @@ impl FileServer {
 
 type Shared = Arc<Mutex<Registry>>;
 
-async fn serve(
-    State(registry): State<Shared>,
-    AxumPath(ids): AxumPath<String>,
+async fn serve_with_name(
+    state: State<Shared>,
+    AxumPath((id, _name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     method: Method,
 ) -> Response {
-    // ids = "123" or "123/name"; the name segment is decorative — the file is
-    // resolved exclusively through the opaque id.
-    let id_str = ids.split('/').next().unwrap_or("");
+    serve_inner(state, id, headers, method).await
+}
+
+async fn serve(
+    state: State<Shared>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+    method: Method,
+) -> Response {
+    serve_inner(state, id, headers, method).await
+}
+
+async fn serve_inner(
+    State(registry): State<Shared>,
+    id_str: String,
+    headers: HeaderMap,
+    method: Method,
+) -> Response {
+    // The file is resolved exclusively through the opaque id — the name
+    // segment is decorative and never interpreted as a path.
     let Ok(id) = id_str.parse::<PartId>() else {
         return not_found();
     };
