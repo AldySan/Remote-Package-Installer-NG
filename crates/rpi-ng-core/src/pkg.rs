@@ -9,7 +9,11 @@
 //! offset is bounds-checked against the real file size, and failures produce
 //! an `Err` with a precise reason instead of a panic.
 
-use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use crate::{
     model::{ContentKind, PkgInfo},
@@ -124,7 +128,10 @@ pub fn parse_pkg(file: &mut File, file_size: u64) -> Result<PkgInfo, PkgError> {
     // Header fields.
     let content_id_raw: [u8; CONTENT_ID_LEN] =
         header[0x40..0x40 + CONTENT_ID_LEN].try_into().unwrap();
-    let trim = content_id_raw.iter().position(|&b| b == 0).unwrap_or(CONTENT_ID_LEN);
+    let trim = content_id_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(CONTENT_ID_LEN);
     if !content_id_raw[..trim].is_ascii() {
         return Err(PkgError::BadContentId);
     }
@@ -134,8 +141,8 @@ pub fn parse_pkg(file: &mut File, file_size: u64) -> Result<PkgInfo, PkgError> {
     let content_flags = be_u32(&header, 0x78);
     let header_size = be_u64(&header, 0x430);
 
-    let is_patch =
-        (content_flags & CONTENT_FLAGS_FIRST_PATCH) != 0 || (content_flags & CONTENT_FLAGS_SUBSEQUENT_PATCH) != 0;
+    let is_patch = (content_flags & CONTENT_FLAGS_FIRST_PATCH) != 0
+        || (content_flags & CONTENT_FLAGS_SUBSEQUENT_PATCH) != 0;
 
     let title_id = match sfo.get_str("CONTENT_ID") {
         Some(cid) => PkgInfo::title_id_from_content_id(cid)

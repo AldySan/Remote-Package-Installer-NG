@@ -13,7 +13,11 @@ async fn start_server() -> (FileServer, SocketAddr) {
     (server, bind)
 }
 
-async fn get(addr: SocketAddr, path: &str, headers: &[(&str, &str)]) -> (u16, Vec<u8>, Option<String>, Option<String>) {
+async fn get(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (u16, Vec<u8>, Option<String>, Option<String>) {
     let mut req = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -25,8 +29,14 @@ async fn get(addr: SocketAddr, path: &str, headers: &[(&str, &str)]) -> (u16, Ve
     }
     let resp = req.send().await.unwrap();
     let status = resp.status().as_u16();
-    let content_range = resp.headers().get("content-range").map(|v| v.to_str().unwrap().into());
-    let accept_ranges = resp.headers().get("accept-ranges").map(|v| v.to_str().unwrap().into());
+    let content_range = resp
+        .headers()
+        .get("content-range")
+        .map(|v| v.to_str().unwrap().into());
+    let accept_ranges = resp
+        .headers()
+        .get("accept-ranges")
+        .map(|v| v.to_str().unwrap().into());
     let body = resp.bytes().await.unwrap().to_vec();
     (status, body, content_range, accept_ranges)
 }
@@ -99,30 +109,55 @@ async fn range_requests_single_and_suffix() {
     let id = server.register(path, Some("game.pkg".into()));
 
     // Middle range.
-    let (status, body, cr, _) = get(addr, &format!("/pkg/{id}/game.pkg"), &[("Range", "bytes=100-199")]).await;
+    let (status, body, cr, _) = get(
+        addr,
+        &format!("/pkg/{id}/game.pkg"),
+        &[("Range", "bytes=100-199")],
+    )
+    .await;
     assert_eq!(status, 206);
     assert_eq!(body.len(), 100);
     assert_eq!(body[..10], data[100..110]);
     assert_eq!(cr.as_deref(), Some("bytes 100-199/10000"));
 
     // Open-ended range.
-    let (status, body, _, _) = get(addr, &format!("/pkg/{id}/game.pkg"), &[("Range", "bytes=9900-")]).await;
+    let (status, body, _, _) = get(
+        addr,
+        &format!("/pkg/{id}/game.pkg"),
+        &[("Range", "bytes=9900-")],
+    )
+    .await;
     assert_eq!(status, 206);
     assert_eq!(body.len(), 100);
 
     // Suffix range: last 50 bytes.
-    let (status, body, cr, _) = get(addr, &format!("/pkg/{id}/game.pkg"), &[("Range", "bytes=-50")]).await;
+    let (status, body, cr, _) = get(
+        addr,
+        &format!("/pkg/{id}/game.pkg"),
+        &[("Range", "bytes=-50")],
+    )
+    .await;
     assert_eq!(status, 206);
     assert_eq!(body.len(), 50);
     assert_eq!(body, data[9950..]);
     assert_eq!(cr.as_deref(), Some("bytes 9950-9999/10000"));
 
     // Unsatisfiable range → 416.
-    let (status, _, _, _) = get(addr, &format!("/pkg/{id}/game.pkg"), &[("Range", "bytes=99999-")]).await;
+    let (status, _, _, _) = get(
+        addr,
+        &format!("/pkg/{id}/game.pkg"),
+        &[("Range", "bytes=99999-")],
+    )
+    .await;
     assert_eq!(status, 416);
 
     // Multi-range falls back to a full 200 response (RFC-permitted).
-    let (status, body, _, _) = get(addr, &format!("/pkg/{id}/game.pkg"), &[("Range", "bytes=0-1,5-6")]).await;
+    let (status, body, _, _) = get(
+        addr,
+        &format!("/pkg/{id}/game.pkg"),
+        &[("Range", "bytes=0-1,5-6")],
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(body.len(), 10_000);
 }
@@ -154,7 +189,10 @@ async fn head_requests_have_headers_no_body() {
 #[tokio::test]
 async fn url_encoding_escapes_special_characters() {
     let (server, _addr) = start_server().await;
-    let id = server.register(PathBuf::from("/tmp/my game+.pkg"), Some("my game+.pkg".into()));
+    let id = server.register(
+        PathBuf::from("/tmp/my game+.pkg"),
+        Some("my game+.pkg".into()),
+    );
     let url = server.url_for(id).unwrap();
     assert!(url.contains("my%20game+.pkg"), "url was: {url}");
 }

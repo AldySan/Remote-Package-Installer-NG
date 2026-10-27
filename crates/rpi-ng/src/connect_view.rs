@@ -77,8 +77,10 @@ fn status_line(app: &mut App, ui: &mut egui::Ui) {
     });
     if let ConsoleStatus::Incompatible(reason) = &app.snapshot.console.status {
         ui.label(
-            egui::RichText::new(format!("The last address did not answer like an installer: {reason}"))
-                .color(egui::Color32::from_rgb(239, 68, 68)),
+            egui::RichText::new(format!(
+                "The last address did not answer like an installer: {reason}"
+            ))
+            .color(egui::Color32::from_rgb(239, 68, 68)),
         );
     }
     if matches!(app.snapshot.console.status, ConsoleStatus::Lost) {
@@ -152,9 +154,10 @@ fn manual(app: &mut App, ui: &mut egui::Ui) {
                 .add_enabled(enabled, egui::Button::new("Connect"))
                 .on_disabled_hover_text("Enter a valid IP address first")
                 .clicked()
-                && let Some(addr) = parsed {
-                    app.send(rpi_ng_core::Command::Connect(addr));
-                }
+                && let Some(addr) = parsed
+            {
+                app.send(rpi_ng_core::Command::Connect(addr));
+            }
         });
     });
 }

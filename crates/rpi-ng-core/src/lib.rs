@@ -18,7 +18,7 @@ pub mod rpi;
 pub mod settings;
 pub mod sfo;
 
-pub use engine::{spawn, Command, EngineHandle};
+pub use engine::{Command, EngineHandle, spawn};
 pub use model::Event;
 pub use settings::Settings;
 

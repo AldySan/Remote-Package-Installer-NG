@@ -13,14 +13,14 @@ use std::{
 };
 
 use axum::{
+    Json, Router,
     body::Body,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use rpi_ng_core::{
     engine::Command,
@@ -137,7 +137,10 @@ async fn is_exists(Json(_body): Json<Value>) -> Response {
     Json(json!({"status": "success", "exists": "false"})).into_response()
 }
 
-async fn find_task(State(state): State<Arc<Mutex<MockState>>>, Json(body): Json<Value>) -> Response {
+async fn find_task(
+    State(state): State<Arc<Mutex<MockState>>>,
+    Json(body): Json<Value>,
+) -> Response {
     let cid = body["content_id"].as_str().unwrap_or_default().to_string();
     let st = state.lock().unwrap();
     match st.by_content.get(&cid) {
@@ -150,10 +153,7 @@ async fn ok_task(Json(_body): Json<Value>) -> Response {
     Json(json!({"status": "success"})).into_response()
 }
 
-async fn install(
-    State(state): State<Arc<Mutex<MockState>>>,
-    Json(body): Json<Value>,
-) -> Response {
+async fn install(State(state): State<Arc<Mutex<MockState>>>, Json(body): Json<Value>) -> Response {
     {
         let mut st = state.lock().unwrap();
         st.installs.push(body.clone());
@@ -201,10 +201,7 @@ async fn install(
     Json(json!({"status": "success", "task_id": task_id, "title": "Mock Game"})).into_response()
 }
 
-async fn progress(
-    State(state): State<Arc<Mutex<MockState>>>,
-    Json(body): Json<Value>,
-) -> Response {
+async fn progress(State(state): State<Arc<Mutex<MockState>>>, Json(body): Json<Value>) -> Response {
     let task_id = body["task_id"].as_i64().unwrap_or(-1);
     let dialect = state.lock().unwrap().dialect;
     let mut st = state.lock().unwrap();
@@ -289,11 +286,21 @@ async fn fetch_range_total(url: &str) -> Option<u64> {
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;
-    let resp = client.get(url).header("Range", "bytes=0-8191").send().await.ok()?;
+    let resp = client
+        .get(url)
+        .header("Range", "bytes=0-8191")
+        .send()
+        .await
+        .ok()?;
     if resp.status().as_u16() != 206 {
         return None;
     }
-    let cr = resp.headers().get("content-range")?.to_str().ok()?.to_string();
+    let cr = resp
+        .headers()
+        .get("content-range")?
+        .to_str()
+        .ok()?
+        .to_string();
     resp.bytes().await.ok()?;
     cr.split('/').nth(1)?.parse().ok()
 }
@@ -372,7 +379,10 @@ async fn backend_failures_surface_error_codes() {
     let mock = MockConsole::start(Dialect::BrokenHex).await;
     mock.state.lock().unwrap().fail_installs = Some(0x8099_0007);
     let client = client_for(mock.addr);
-    let err = client.install_direct(&["http://127.0.0.1:1/x.pkg".into()]).await.unwrap_err();
+    let err = client
+        .install_direct(&["http://127.0.0.1:1/x.pkg".into()])
+        .await
+        .unwrap_err();
     match err {
         RpiError::BackendError { code, .. } => assert_eq!(code, 0x8099_0007),
         other => panic!("expected BackendError, got {other:?}"),
@@ -400,7 +410,10 @@ async fn connection_refused_is_transparent() {
     drop(listener);
     let client = RpiClient::new(addr, Duration::from_secs(2));
     let err = client.is_exists("CUSA00000").await.unwrap_err();
-    assert!(matches!(err, RpiError::ConnectionRefused | RpiError::Network(_)));
+    assert!(matches!(
+        err,
+        RpiError::ConnectionRefused | RpiError::Network(_)
+    ));
     assert!(err.is_transient());
 }
 
@@ -438,7 +451,13 @@ fn build_fake_pkg(dir: &std::path::Path, name: &str, content_id: &str) -> std::p
         let val_off = values.len();
         values.extend_from_slice(v.as_bytes());
         values.push(0);
-        index.push((key_off as u16, 0x0204u16, (v.len() + 1) as u32, (v.len() + 1) as u32, val_off as u32));
+        index.push((
+            key_off as u16,
+            0x0204u16,
+            (v.len() + 1) as u32,
+            (v.len() + 1) as u32,
+            val_off as u32,
+        ));
     }
     let mut sfo = Vec::new();
     sfo.extend_from_slice(b"\0PSF");
@@ -478,7 +497,8 @@ fn build_fake_pkg(dir: &std::path::Path, name: &str, content_id: &str) -> std::p
     f.write_all(&sfo).unwrap();
     f.write_all(&entry_table).unwrap();
     let cur = 0x2000 + sfo.len() + entry_table.len();
-    f.write_all(&vec![0u8; data_len.saturating_sub(cur)]).unwrap();
+    f.write_all(&vec![0u8; data_len.saturating_sub(cur)])
+        .unwrap();
     f.sync_all().unwrap();
     path
 }
@@ -498,9 +518,10 @@ async fn wait_for_snapshot(
             }
         }
         if let Some(s) = &last
-            && cond(s) {
-                return s.clone();
-            }
+            && cond(s)
+        {
+            return s.clone();
+        }
         if tokio::time::Instant::now() >= deadline {
             panic!("timeout waiting for snapshot condition; last={last:?}");
         }
@@ -525,33 +546,51 @@ async fn engine_end_to_end_flow_completes_with_evidence() {
         ..Settings::default()
     };
 
-    let handle = rpi_ng_core::engine::spawn_with(
-        settings,
-        Some(data_dir.path().to_path_buf()),
-    );
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
 
     // 1. Connect to the mock console.
     handle.send(Command::Connect(mock.addr));
     let snap = wait_for_snapshot(
         &handle,
-        |s| matches!(s.console.status, rpi_ng_core::model::ConsoleStatus::Connected),
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
         Duration::from_secs(10),
     )
     .await;
-    assert!(snap.server.is_some(), "file server must be running after connect");
+    assert!(
+        snap.server.is_some(),
+        "file server must be running after connect"
+    );
 
     // 2. Add the PKG.
-    handle.send(Command::AddPaths { paths: vec![pkg_path], recursive: false });
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
     let snap = wait_for_snapshot(
         &handle,
-        |s| s.items.iter().any(|i| i.parts.iter().any(|p| p.pkg.is_some())),
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.parts.iter().any(|p| p.pkg.is_some()))
+        },
         Duration::from_secs(10),
     )
     .await;
     let item = &snap.items[0];
     assert_eq!(item.state, ItemState::Queued);
-    assert_eq!(item.parts[0].pkg.as_ref().unwrap().title.as_deref(), Some("Mock Game"));
-    assert_eq!(item.parts[0].pkg.as_ref().unwrap().title_id.as_deref(), Some("CUSA07777"));
+    assert_eq!(
+        item.parts[0].pkg.as_ref().unwrap().title.as_deref(),
+        Some("Mock Game")
+    );
+    assert_eq!(
+        item.parts[0].pkg.as_ref().unwrap().title_id.as_deref(),
+        Some("CUSA07777")
+    );
 
     // 3. Start the queue.
     handle.send(Command::Start);
@@ -563,7 +602,11 @@ async fn engine_end_to_end_flow_completes_with_evidence() {
         Duration::from_secs(30),
     )
     .await;
-    let item = snap.items.iter().find(|i| i.state == ItemState::Completed).unwrap();
+    let item = snap
+        .items
+        .iter()
+        .find(|i| i.state == ItemState::Completed)
+        .unwrap();
     let progress = item.progress.unwrap();
     assert_eq!(progress.total, 512 * 1024);
     assert_eq!(progress.percent, 100.0);
@@ -594,7 +637,11 @@ async fn engine_end_to_end_flow_completes_with_evidence() {
 async fn engine_marks_failed_on_console_error() {
     let data_dir = tempfile::tempdir().unwrap();
     let pkg_dir = tempfile::tempdir().unwrap();
-    let pkg_path = build_fake_pkg(pkg_dir.path(), "fail.pkg", "UP0001-CUSA08888_00-FAILPKG0000000");
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "fail.pkg",
+        "UP0001-CUSA08888_00-FAILPKG0000000",
+    );
 
     let mock = MockConsole::start(Dialect::BrokenHex).await;
     // Tiny step so the transfer takes many polls — time to poison the task
@@ -606,27 +653,36 @@ async fn engine_marks_failed_on_console_error() {
         discovery_enabled: false,
         ..Settings::default()
     };
-    let handle = rpi_ng_core::engine::spawn_with(
-        settings,
-        Some(data_dir.path().to_path_buf()),
-    );
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
 
     handle.send(Command::Connect(mock.addr));
     wait_for_snapshot(
         &handle,
-        |s| matches!(s.console.status, rpi_ng_core::model::ConsoleStatus::Connected),
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
         Duration::from_secs(10),
     )
     .await;
 
-    handle.send(Command::AddPaths { paths: vec![pkg_path], recursive: false });
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
     wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
 
     handle.send(Command::Start);
     // Wait for the task to exist on the mock, then poison it.
     let snap = wait_for_snapshot(
         &handle,
-        |s| s.items.iter().any(|i| i.state == ItemState::Transferring || i.state == ItemState::Installing),
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.state == ItemState::Transferring || i.state == ItemState::Installing)
+        },
         Duration::from_secs(20),
     )
     .await;
@@ -641,7 +697,11 @@ async fn engine_marks_failed_on_console_error() {
 
     let snap = wait_for_snapshot(
         &handle,
-        |s| s.items.iter().any(|i| i.id == item_id && i.state == ItemState::Failed),
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Failed)
+        },
         Duration::from_secs(20),
     )
     .await;

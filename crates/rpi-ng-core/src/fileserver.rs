@@ -20,12 +20,12 @@ use std::{
 };
 
 use axum::{
+    Router,
     body::Body,
     extract::{Path as AxumPath, State},
-    http::{header, HeaderMap, Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
@@ -92,7 +92,10 @@ impl FileServer {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
         let app = Router::new()
-            .route("/pkg/{id}/{name}", get(serve_with_name).head(serve_with_name))
+            .route(
+                "/pkg/{id}/{name}",
+                get(serve_with_name).head(serve_with_name),
+            )
             .route("/pkg/{id}", get(serve).head(serve))
             .with_state(Arc::clone(&registry));
 
@@ -246,10 +249,9 @@ async fn serve_inner(
         return builder.body(Body::empty()).unwrap();
     }
 
-    if offset > 0
-        && file.seek(SeekFrom::Start(offset)).await.is_err() {
-            return not_found();
-        }
+    if offset > 0 && file.seek(SeekFrom::Start(offset)).await.is_err() {
+        return not_found();
+    }
     // Stream exactly `length` bytes in bounded chunks.
     let stream = ReaderStream::with_capacity(file.take(length), 64 * 1024);
     let body = Body::from_stream(stream);

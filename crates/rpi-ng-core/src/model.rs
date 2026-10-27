@@ -242,9 +242,10 @@ pub struct PartFile {
 impl PartFile {
     pub fn display_title(&self) -> String {
         if let Some(pkg) = &self.pkg
-            && let Some(t) = &pkg.title {
-                return t.clone();
-            }
+            && let Some(t) = &pkg.title
+        {
+            return t.clone();
+        }
         self.file_name.clone()
     }
 
@@ -286,7 +287,9 @@ impl QueueItem {
     }
 
     pub fn content_id(&self) -> Option<&str> {
-        self.primary_part().and_then(|p| p.pkg.as_ref()).map(|p| p.content_id.as_str())
+        self.primary_part()
+            .and_then(|p| p.pkg.as_ref())
+            .map(|p| p.content_id.as_str())
     }
 
     /// A stable grouping key for duplicate detection: the parsed content id when
@@ -357,7 +360,10 @@ impl ItemState {
     }
 
     pub fn is_finished(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled | Self::Invalid)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Invalid
+        )
     }
 }
 

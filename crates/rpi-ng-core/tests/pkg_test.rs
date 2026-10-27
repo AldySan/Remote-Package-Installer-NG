@@ -21,7 +21,13 @@ fn build_sfo(entries: &[(&str, &str)]) -> Vec<u8> {
         let val_off = values.len();
         values.extend_from_slice(v.as_bytes());
         values.push(0);
-        index.push((key_off as u16, 0x0204u16, (v.len() + 1) as u32, (v.len() + 1) as u32, val_off as u32));
+        index.push((
+            key_off as u16,
+            0x0204u16,
+            (v.len() + 1) as u32,
+            (v.len() + 1) as u32,
+            val_off as u32,
+        ));
     }
 
     let mut out = Vec::new();
@@ -43,7 +49,12 @@ fn build_sfo(entries: &[(&str, &str)]) -> Vec<u8> {
 }
 
 /// Build a PKG file (header + entry table + SFO payload) in a temp file.
-fn build_pkg(dir: &std::path::Path, name: &str, content_id: &str, entries: &[(&str, &str)]) -> std::path::PathBuf {
+fn build_pkg(
+    dir: &std::path::Path,
+    name: &str,
+    content_id: &str,
+    entries: &[(&str, &str)],
+) -> std::path::PathBuf {
     let sfo = build_sfo(entries);
 
     // Entry table: one PARAM.SFO entry located after the header (0x20 bytes).
@@ -109,7 +120,12 @@ fn parses_full_pkg_with_sfo_metadata() {
 #[test]
 fn detects_patch_flag() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = build_pkg(tmp.path(), "patch.pkg", "UP0001-CUSA01234_00-PATCH00000000000", &[("TITLE", "P")]);
+    let path = build_pkg(
+        tmp.path(),
+        "patch.pkg",
+        "UP0001-CUSA01234_00-PATCH00000000000",
+        &[("TITLE", "P")],
+    );
     // Flip the FIRST_PATCH content flag bit (offset 0x78).
     let mut buf = std::fs::read(&path).unwrap();
     buf[0x78..0x7C].copy_from_slice(&0x0010_0000u32.to_be_bytes());
@@ -171,8 +187,14 @@ fn sfo_bounds_and_formats() {
 fn multipart_name_splitting() {
     assert_eq!(pkg::split_part_name("Game_0.pkg"), ("Game".into(), Some(0)));
     assert_eq!(pkg::split_part_name("Game_1.pkg"), ("Game".into(), Some(1)));
-    assert_eq!(pkg::split_part_name("Game_12.pkg"), ("Game".into(), Some(12)));
+    assert_eq!(
+        pkg::split_part_name("Game_12.pkg"),
+        ("Game".into(), Some(12))
+    );
     assert_eq!(pkg::split_part_name("Game.pkg"), ("Game".into(), None));
-    assert_eq!(pkg::split_part_name("Game_v2.pkg"), ("Game_v2".into(), None));
+    assert_eq!(
+        pkg::split_part_name("Game_v2.pkg"),
+        ("Game_v2".into(), None)
+    );
     assert_eq!(pkg::split_part_name("GAME_3.PKG"), ("GAME".into(), Some(3)));
 }

@@ -99,7 +99,10 @@ fn move_item_bounds() {
     let (added, _) = q.add_paths(paths);
     let (a, b, c) = (added[0], added[1], added[2]);
     assert!(q.move_item(c, -1)); // C before B
-    assert_eq!(q.items().iter().map(|i| i.id).collect::<Vec<_>>(), vec![a, c, b]);
+    assert_eq!(
+        q.items().iter().map(|i| i.id).collect::<Vec<_>>(),
+        vec![a, c, b]
+    );
     assert!(!q.move_item(a, -1)); // already first
     assert!(!q.move_item(b, 1)); // already last (after moves: a,c,b)
 }

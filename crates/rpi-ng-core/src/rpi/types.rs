@@ -199,9 +199,13 @@ pub fn explain_error_code(code: i64) -> Option<&'static str> {
         0x8099_0006 => Some("Console reports the operation is not supported (BGFT not available)."),
         0x8099_0004 => Some("Console-side install error (BGFT rejected the task)."),
         0x8099_0007 => Some("Console reports invalid task data (package manifest rejected)."),
-        0x8099_000A => Some("Console-side transfer failed (network or disk error during download)."),
+        0x8099_000A => {
+            Some("Console-side transfer failed (network or disk error during download).")
+        }
         0x8099_0016 => Some("Console reports the task is already running or registered."),
-        0x8099_0019 => Some("Console reports the task was not found (it may have finished or been unregistered)."),
+        0x8099_0019 => Some(
+            "Console reports the task was not found (it may have finished or been unregistered).",
+        ),
         _ => None,
     }
 }

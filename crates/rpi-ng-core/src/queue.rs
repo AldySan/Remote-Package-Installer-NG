@@ -6,10 +6,13 @@
 //! auto-resubmitted — the engine reconciles against the console when one is
 //! connected, and resubmission is always a deliberate user act.
 
-use std::{collections::HashSet, path::{Path, PathBuf}};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    model::{unix_ms, ItemId, ItemState, PartFile, PartId, QueueItem},
+    model::{ItemId, ItemState, PartFile, PartId, QueueItem, unix_ms},
     pkg,
     settings::atomic_write,
 };
@@ -45,9 +48,10 @@ impl Queue {
         };
         for candidate in [dir.join(QUEUE_FILE), dir.join(QUEUE_BAK)] {
             if let Ok(text) = std::fs::read_to_string(&candidate)
-                && let Ok(doc) = serde_json::from_str::<QueueDoc>(&text) {
-                    return Self::from_doc(doc);
-                }
+                && let Ok(doc) = serde_json::from_str::<QueueDoc>(&text)
+            {
+                return Self::from_doc(doc);
+            }
         }
         Self::default()
     }
@@ -237,7 +241,9 @@ impl Queue {
             if item.state.is_finished() {
                 continue;
             }
-            let Some(cid) = item.content_id() else { continue };
+            let Some(cid) = item.content_id() else {
+                continue;
+            };
             let key = format!("cid:{cid}");
             match first_by_cid.get(&key) {
                 Some(first) if *first != item.id => dupes.push((*first, item.id)),
@@ -292,7 +298,10 @@ impl Queue {
 
     /// Next item to process (first queued, in order).
     pub fn next_queued(&self) -> Option<ItemId> {
-        self.items.iter().find(|i| i.state == ItemState::Queued).map(|i| i.id)
+        self.items
+            .iter()
+            .find(|i| i.state == ItemState::Queued)
+            .map(|i| i.id)
     }
 
     pub fn any_active(&self) -> bool {
@@ -303,7 +312,9 @@ impl Queue {
         let mut stats = QueueStats::default();
         for item in &self.items {
             match item.state {
-                ItemState::Queued | ItemState::Preparing | ItemState::Submitting => stats.pending += 1,
+                ItemState::Queued | ItemState::Preparing | ItemState::Submitting => {
+                    stats.pending += 1
+                }
                 ItemState::Transferring | ItemState::Installing => stats.active += 1,
                 ItemState::Paused => stats.paused += 1,
                 ItemState::Completed => stats.completed += 1,

@@ -4,7 +4,10 @@ use eframe::egui;
 
 use rpi_ng_core::model::{ItemState, ProgressView, QueueItem};
 
-use crate::{app::{queue_summary, state_color, App}, dialogs, fmt};
+use crate::{
+    app::{App, queue_summary, state_color},
+    dialogs, fmt,
+};
 
 const ROW_HEIGHT: f32 = 74.0;
 
@@ -73,7 +76,11 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.separator();
 
-        let start_label = if any_active { "Queue running" } else { "Start queue" };
+        let start_label = if any_active {
+            "Queue running"
+        } else {
+            "Start queue"
+        };
         if ui
             .add_enabled(!any_active && !busy, egui::Button::new(start_label))
             .on_hover_text("Install queued items in order")
@@ -90,7 +97,10 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         }
         if ui
             .add_enabled(
-                app.snapshot.items.iter().any(|i| i.state == ItemState::Paused),
+                app.snapshot
+                    .items
+                    .iter()
+                    .any(|i| i.state == ItemState::Paused),
                 egui::Button::new("Resume"),
             )
             .clicked()
@@ -130,10 +140,7 @@ fn empty_state(app: &mut App, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(20.0);
             ui.heading("Drop PKG files here");
-            ui.label(
-                egui::RichText::new("…or use “Add PKG files…” / “Add folder…” above.")
-                    .weak(),
-            );
+            ui.label(egui::RichText::new("…or use “Add PKG files…” / “Add folder…” above.").weak());
             ui.add_space(12.0);
             if let Some(server) = &app.snapshot.server {
                 ui.label(
@@ -155,17 +162,16 @@ fn item_row(app: &mut App, ui: &mut egui::Ui, item: &QueueItem) {
     let state = item.state;
     let color = state_color(&state);
     let primary = item.primary_part();
-    let title = primary.map(|p| p.display_title()).unwrap_or_else(|| "—".into());
+    let title = primary
+        .map(|p| p.display_title())
+        .unwrap_or_else(|| "—".into());
     let size = fmt::bytes(item.total_size());
 
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_min_width(ui.available_width() - 240.0);
             ui.horizontal(|ui| {
-                ui.strong(
-                    egui::RichText::new(title)
-                        .color(ui.style().visuals.strong_text_color()),
-                );
+                ui.strong(egui::RichText::new(title).color(ui.style().visuals.strong_text_color()));
                 if item.is_multipart() {
                     ui.label(
                         egui::RichText::new(format!("{} parts", item.parts.len()))
@@ -176,7 +182,9 @@ fn item_row(app: &mut App, ui: &mut egui::Ui, item: &QueueItem) {
                 if let Some(p) = primary.and_then(|p| p.pkg.as_ref()) {
                     if p.is_patch {
                         ui.label(
-                            egui::RichText::new("patch").small().color(egui::Color32::from_rgb(245, 158, 11)),
+                            egui::RichText::new("patch")
+                                .small()
+                                .color(egui::Color32::from_rgb(245, 158, 11)),
                         );
                     }
                     if let Some(kind) = p.content_kind.package_type() {
@@ -218,18 +226,22 @@ fn item_row(app: &mut App, ui: &mut egui::Ui, item: &QueueItem) {
             if ui.small_button("Resume").clicked() {
                 app.send(rpi_ng_core::Command::Resume);
             }
-        } else if active
-            && ui.small_button("Pause").clicked() {
-                app.send(rpi_ng_core::Command::Pause);
-            }
+        } else if active && ui.small_button("Pause").clicked() {
+            app.send(rpi_ng_core::Command::Pause);
+        }
         if state == ItemState::Unknown
-            && ui.small_button("Mark completed").on_hover_text("You verified on the console that it finished").clicked() {
-                app.send(rpi_ng_core::Command::MarkCompleted(id));
-            }
+            && ui
+                .small_button("Mark completed")
+                .on_hover_text("You verified on the console that it finished")
+                .clicked()
+        {
+            app.send(rpi_ng_core::Command::MarkCompleted(id));
+        }
         if (state.is_finished() || state == ItemState::Unknown)
-            && ui.small_button("Retry").clicked() {
-                app.send(rpi_ng_core::Command::Retry(id));
-            }
+            && ui.small_button("Retry").clicked()
+        {
+            app.send(rpi_ng_core::Command::Retry(id));
+        }
         if !active {
             if ui.small_button("Remove").clicked() {
                 app.send(rpi_ng_core::Command::Remove(id));

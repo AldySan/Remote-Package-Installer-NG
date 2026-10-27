@@ -5,9 +5,9 @@ use std::{collections::VecDeque, path::PathBuf, time::Duration};
 use eframe::egui;
 
 use rpi_ng_core::{
+    Command, EngineHandle,
     model::{ConsoleCandidate, ConsoleStatus, Event, ItemState, LogLevel, QueueItem, Snapshot},
     settings::{Settings, ThemeMode},
-    Command, EngineHandle,
 };
 
 use crate::{connect_view, dialogs, log_view, queue_view, settings_view};
@@ -87,7 +87,8 @@ impl App {
                     self.snapshot = s;
                 }
                 Event::Log(level, msg) => {
-                    self.logs.push_back((rpi_ng_core::model::unix_ms(), level, msg));
+                    self.logs
+                        .push_back((rpi_ng_core::model::unix_ms(), level, msg));
                     while self.logs.len() > MAX_LOG_LINES {
                         self.logs.pop_front();
                     }
@@ -103,11 +104,16 @@ impl App {
 
     fn poll_dialog(&mut self) {
         let Some(dialog) = &self.dialog else { return };
-        let Some(outcome) = dialog.try_result() else { return };
+        let Some(outcome) = dialog.try_result() else {
+            return;
+        };
         self.dialog = None;
         match outcome {
             dialogs::DialogOutcome::Files(files) => {
-                self.send(Command::AddPaths { paths: files, recursive: false });
+                self.send(Command::AddPaths {
+                    paths: files,
+                    recursive: false,
+                });
             }
             dialogs::DialogOutcome::Folder(path) => {
                 self.pending_folder = Some(path);
@@ -130,12 +136,17 @@ impl App {
             self.pending_folder = Some(first_dir.clone());
         }
         if !files.is_empty() {
-            self.send(Command::AddPaths { paths: files, recursive: false });
+            self.send(Command::AddPaths {
+                paths: files,
+                recursive: false,
+            });
         }
     }
 
     fn folder_choice(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.pending_folder.clone() else { return };
+        let Some(path) = self.pending_folder.clone() else {
+            return;
+        };
         // None = still deciding, Some(None) = cancelled, Some(Some(rec)) = scan.
         let mut action: Option<Option<bool>> = None;
         egui::Window::new("Add folder")
@@ -159,7 +170,10 @@ impl App {
         match action {
             Some(Some(recursive)) => {
                 self.pending_folder = None;
-                self.send(Command::AddPaths { paths: vec![path], recursive });
+                self.send(Command::AddPaths {
+                    paths: vec![path],
+                    recursive,
+                });
             }
             Some(None) => self.pending_folder = None,
             None => {}
@@ -189,7 +203,11 @@ impl eframe::App for App {
                     if ui.button("About").clicked() {
                         self.show_about = !self.show_about;
                     }
-                    let log_label = if self.show_log { "Hide log" } else { "Show log" };
+                    let log_label = if self.show_log {
+                        "Hide log"
+                    } else {
+                        "Show log"
+                    };
                     if ui.button(log_label).clicked() {
                         self.show_log = !self.show_log;
                     }
@@ -280,9 +298,9 @@ impl App {
                 .small_button("Switch")
                 .on_hover_text("Pick a different console")
                 .clicked()
-            {
-                self.force_connect_view = true;
-            }
+        {
+            self.force_connect_view = true;
+        }
     }
 }
 
@@ -325,7 +343,10 @@ pub(crate) fn state_color(state: &ItemState) -> egui::Color32 {
 
 pub(crate) fn queue_summary(items: &[QueueItem]) -> String {
     let total = items.len();
-    let done = items.iter().filter(|i| i.state == ItemState::Completed).count();
+    let done = items
+        .iter()
+        .filter(|i| i.state == ItemState::Completed)
+        .count();
     let failed = items
         .iter()
         .filter(|i| matches!(i.state, ItemState::Failed | ItemState::Invalid))

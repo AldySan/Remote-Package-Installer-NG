@@ -71,7 +71,10 @@ impl LanNetwork {
             ];
         }
         let mut out = Vec::new();
-        let total = self.broadcast.saturating_sub(self.network).saturating_sub(1);
+        let total = self
+            .broadcast
+            .saturating_sub(self.network)
+            .saturating_sub(1);
         let n = total.min(max as u32);
         for i in 0..n {
             out.push(IpAddr::V4(from_u32(self.network + 1 + i)));
@@ -93,9 +96,7 @@ pub fn local_networks() -> Vec<LanNetwork> {
     if let Ok(ifaces) = if_addrs::get_if_addrs() {
         for iface in ifaces {
             let (ip, mask) = match iface.addr {
-                if_addrs::IfAddr::V4(v4) => {
-                    (IpAddr::V4(v4.ip), IpAddr::V4(v4.netmask))
-                }
+                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), IpAddr::V4(v4.netmask)),
                 if_addrs::IfAddr::V6(_) => continue,
             };
             if let Some(net) = LanNetwork::from_interface(&iface.name, &ip, &mask) {
@@ -113,16 +114,13 @@ pub async fn discover(settings: &Settings) -> Vec<ConsoleCandidate> {
     let mut seen_ips: HashSet<IpAddr> = HashSet::new();
 
     // 1. Remembered hosts (usually the answer).
-    let remembered: Vec<SocketAddr> = settings
-        .remembered
-        .iter()
-        .map(|rc| rc.addr)
-        .collect();
+    let remembered: Vec<SocketAddr> = settings.remembered.iter().map(|rc| rc.addr).collect();
     for addr in remembered {
         if seen_ips.insert(addr.ip())
-            && let Some(c) = verify_addr(addr, DiscoverySource::Remembered).await {
-                candidates.push(c);
-            }
+            && let Some(c) = verify_addr(addr, DiscoverySource::Remembered).await
+        {
+            candidates.push(c);
+        }
     }
 
     // 2. Bounded subnet sweep.
@@ -138,15 +136,16 @@ pub async fn discover(settings: &Settings) -> Vec<ConsoleCandidate> {
         }
 
         let timeout = settings.discovery_timeout;
-        let hits: Vec<Option<SocketAddr>> = stream::iter(targets.into_iter().map(|addr| async move {
-            match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-                Ok(Ok(_)) => Some(addr),
-                _ => None,
-            }
-        }))
-        .buffer_unordered(CONCURRENCY)
-        .collect()
-        .await;
+        let hits: Vec<Option<SocketAddr>> =
+            stream::iter(targets.into_iter().map(|addr| async move {
+                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+                    Ok(Ok(_)) => Some(addr),
+                    _ => None,
+                }
+            }))
+            .buffer_unordered(CONCURRENCY)
+            .collect()
+            .await;
 
         // Dedup by IP (first port hit wins), skipping already-verified ones.
         let mut ordered: Vec<SocketAddr> = Vec::new();

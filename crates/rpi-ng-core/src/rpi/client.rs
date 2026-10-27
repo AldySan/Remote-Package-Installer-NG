@@ -26,7 +26,10 @@ pub enum RpiError {
 impl RpiError {
     /// Transient errors are worth retrying; permanent ones are not.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Network(_) | Self::Timeout(_) | Self::ConnectionRefused)
+        matches!(
+            self,
+            Self::Network(_) | Self::Timeout(_) | Self::ConnectionRefused
+        )
     }
 }
 
@@ -96,7 +99,9 @@ impl RpiClient {
 
         if value.get("status").and_then(|s| s.as_str()) == Some("fail") {
             let code = lenient_i64_from_value(value.get("error_code"));
-            let gloss = explain_error_code(code).unwrap_or("no known translation").to_string();
+            let gloss = explain_error_code(code)
+                .unwrap_or("no known translation")
+                .to_string();
             return Err(RpiError::BackendError { code, gloss });
         }
         serde_json::from_value(value)
@@ -128,18 +133,25 @@ impl RpiClient {
             let exists = self.is_exists("PROBE00000").await;
             let ok = exists.is_ok();
             if !ok {
-                return Err(RpiError::Network("endpoint did not answer the RPI probes".into()));
+                return Err(RpiError::Network(
+                    "endpoint did not answer the RPI probes".into(),
+                ));
             }
         }
 
         // (2) /api/status — newer receivers answer {"busy":...}; old ones HTML.
         let mut caps = BackendCaps::default();
-        if let Ok(resp) = self.http.get(format!("{}/api/status", self.base)).send().await
+        if let Ok(resp) = self
+            .http
+            .get(format!("{}/api/status", self.base))
+            .send()
+            .await
             && let Ok(text) = resp.text().await
-                && text.contains("busy")
-                    && serde_json::from_str::<StatusResponse>(json_fix::repair(&text).as_str()).is_ok() {
-                        caps.status_endpoint = true;
-                    }
+            && text.contains("busy")
+            && serde_json::from_str::<StatusResponse>(json_fix::repair(&text).as_str()).is_ok()
+        {
+            caps.status_endpoint = true;
+        }
 
         // (3) Full request/response path validation (read-only API call).
         match self.is_exists("PROBE00000").await {
@@ -161,7 +173,10 @@ impl RpiClient {
         })
     }
 
-    pub async fn install_direct(&self, package_urls: &[String]) -> Result<InstallResponse, RpiError> {
+    pub async fn install_direct(
+        &self,
+        package_urls: &[String],
+    ) -> Result<InstallResponse, RpiError> {
         let req = InstallDirectRequest {
             kind: "direct",
             packages: package_urls.to_vec(),
@@ -181,7 +196,10 @@ impl RpiClient {
     }
 
     pub async fn install_ref(&self, url: &str) -> Result<InstallResponse, RpiError> {
-        let req = InstallRefRequest { kind: "ref_pkg_url", url: url.to_string() };
+        let req = InstallRefRequest {
+            kind: "ref_pkg_url",
+            url: url.to_string(),
+        };
         let resp: InstallResponse = self.post_json("/api/install", &req).await?;
         if resp.status != "success" {
             return Err(RpiError::BackendError {
@@ -237,12 +255,21 @@ impl RpiClient {
     }
 
     pub async fn is_exists(&self, title_id: &str) -> Result<IsExistsResponse, RpiError> {
-        let req = TitleIdRequest { title_id: title_id.to_string() };
+        let req = TitleIdRequest {
+            title_id: title_id.to_string(),
+        };
         self.post_json("/api/is_exists", &req).await
     }
 
-    pub async fn find_task(&self, content_id: &str, sub_type: i32) -> Result<FindTaskResponse, RpiError> {
-        let req = FindTaskRequest { content_id: content_id.to_string(), sub_type };
+    pub async fn find_task(
+        &self,
+        content_id: &str,
+        sub_type: i32,
+    ) -> Result<FindTaskResponse, RpiError> {
+        let req = FindTaskRequest {
+            content_id: content_id.to_string(),
+            sub_type,
+        };
         self.post_json("/api/find_task", &req).await
     }
 }

@@ -41,7 +41,11 @@ pub enum SfoError {
     #[error("key offset out of bounds (key {key}, offset {offset})")]
     KeyOutOfBounds { key: usize, offset: usize },
     #[error("value out of bounds (key {key}, offset {offset}, size {size})")]
-    ValueOutOfBounds { key: usize, offset: usize, size: usize },
+    ValueOutOfBounds {
+        key: usize,
+        offset: usize,
+        size: usize,
+    },
     #[error("entry size {size} exceeds limit for key {key}")]
     EntryTooLarge { key: usize, size: usize },
     #[error("unterminated key string (key {key})")]
@@ -72,7 +76,12 @@ impl Sfo {
         if entry_count > MAX_ENTRIES {
             return Err(SfoError::TooManyEntries(entry_count, MAX_ENTRIES));
         }
-        if entry_count.checked_mul(0x10).map(|n| 0x14 + n).unwrap_or(usize::MAX) > buf.len() {
+        if entry_count
+            .checked_mul(0x10)
+            .map(|n| 0x14 + n)
+            .unwrap_or(usize::MAX)
+            > buf.len()
+        {
             return Err(SfoError::EntryTableOverflow);
         }
 
@@ -84,33 +93,55 @@ impl Sfo {
             let used_size = be_u32(buf, e + 4) as usize;
             let value_offset = be_u32(buf, e + 0x0C) as usize;
 
-            let key_abs = key_table.checked_add(key_offset).ok_or(SfoError::KeyOutOfBounds {
-                key: i,
-                offset: usize::MAX,
-            })?;
+            let key_abs = key_table
+                .checked_add(key_offset)
+                .ok_or(SfoError::KeyOutOfBounds {
+                    key: i,
+                    offset: usize::MAX,
+                })?;
             if key_abs >= buf.len() {
-                return Err(SfoError::KeyOutOfBounds { key: i, offset: key_abs });
+                return Err(SfoError::KeyOutOfBounds {
+                    key: i,
+                    offset: key_abs,
+                });
             }
             let key_end = buf[key_abs..]
                 .iter()
                 .position(|&b| b == 0)
-                .ok_or(SfoError::UnterminatedKey { key: i })? + key_abs;
+                .ok_or(SfoError::UnterminatedKey { key: i })?
+                + key_abs;
             if key_end > buf.len() {
                 return Err(SfoError::UnterminatedKey { key: i });
             }
             let key = String::from_utf8_lossy(&buf[key_abs..key_end]).into_owned();
 
             if used_size > MAX_ENTRY_SIZE {
-                return Err(SfoError::EntryTooLarge { key: i, size: used_size });
+                return Err(SfoError::EntryTooLarge {
+                    key: i,
+                    size: used_size,
+                });
             }
-            let value_abs = value_table.checked_add(value_offset).ok_or(
-                SfoError::ValueOutOfBounds { key: i, offset: usize::MAX, size: used_size },
-            )?;
+            let value_abs =
+                value_table
+                    .checked_add(value_offset)
+                    .ok_or(SfoError::ValueOutOfBounds {
+                        key: i,
+                        offset: usize::MAX,
+                        size: used_size,
+                    })?;
             let value_end = value_abs
                 .checked_add(used_size)
-                .ok_or(SfoError::ValueOutOfBounds { key: i, offset: usize::MAX, size: used_size })?;
+                .ok_or(SfoError::ValueOutOfBounds {
+                    key: i,
+                    offset: usize::MAX,
+                    size: used_size,
+                })?;
             if value_abs > buf.len() || value_end > buf.len() {
-                return Err(SfoError::ValueOutOfBounds { key: i, offset: value_abs, size: used_size });
+                return Err(SfoError::ValueOutOfBounds {
+                    key: i,
+                    offset: value_abs,
+                    size: used_size,
+                });
             }
 
             let value = match data_format {
@@ -153,9 +184,10 @@ impl Sfo {
     pub fn title(&self, lang_id: u8) -> Option<String> {
         let localized = format!("TITLE_{lang_id:02}");
         if let Some(t) = self.get_str(&localized)
-            && !t.is_empty() {
-                return Some(t.to_string());
-            }
+            && !t.is_empty()
+        {
+            return Some(t.to_string());
+        }
         self.get_str("TITLE").map(|t| t.to_string())
     }
 

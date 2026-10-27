@@ -41,12 +41,20 @@ pub fn repair(body: &str) -> String {
                 out.push(b as char);
                 i += 1;
                 // skip whitespace
-                while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\r' || bytes[i] == b'\n') {
+                while i < bytes.len()
+                    && (bytes[i] == b' '
+                        || bytes[i] == b'\t'
+                        || bytes[i] == b'\r'
+                        || bytes[i] == b'\n')
+                {
                     out.push(bytes[i] as char);
                     i += 1;
                 }
                 // hex literal?
-                if i + 1 < bytes.len() && bytes[i] == b'0' && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
+                if i + 1 < bytes.len()
+                    && bytes[i] == b'0'
+                    && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
+                {
                     let mut j = i + 2;
                     while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
                         j += 1;

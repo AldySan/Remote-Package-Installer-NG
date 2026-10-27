@@ -48,7 +48,10 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                     ui.end_row();
 
                     ui.label("Network scan");
-                    ui.checkbox(&mut draft.discovery_enabled, "Scan for consoles automatically");
+                    ui.checkbox(
+                        &mut draft.discovery_enabled,
+                        "Scan for consoles automatically",
+                    );
                     ui.end_row();
 
                     ui.label("Progress polling");
@@ -66,7 +69,10 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                     ui.end_row();
 
                     ui.label("Folder scans");
-                    ui.checkbox(&mut draft.folder_scan_recursive, "Include subfolders by default");
+                    ui.checkbox(
+                        &mut draft.folder_scan_recursive,
+                        "Include subfolders by default",
+                    );
                     ui.end_row();
 
                     ui.label("Queue");

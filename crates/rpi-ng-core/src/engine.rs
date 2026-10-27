@@ -17,8 +17,9 @@ use crate::{
     discovery,
     fileserver::FileServer,
     model::{
-        unix_ms, ConsoleCandidate, ConsoleGeneration, ConsoleInfo, ConsoleStatus, ConsoleTarget,
-        Event, ItemId, ItemState, LogLevel, PartId, ProgressView, QueueItem, ServerInfo, Snapshot,
+        ConsoleCandidate, ConsoleGeneration, ConsoleInfo, ConsoleStatus, ConsoleTarget, Event,
+        ItemId, ItemState, LogLevel, PartId, ProgressView, QueueItem, ServerInfo, Snapshot,
+        unix_ms,
     },
     pkg::{self, parse_pkg_file},
     queue::Queue,
@@ -30,9 +31,15 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Add files and/or directories (dirs walked per `recursive`).
-    AddPaths { paths: Vec<PathBuf>, recursive: bool },
+    AddPaths {
+        paths: Vec<PathBuf>,
+        recursive: bool,
+    },
     Remove(ItemId),
-    Move { id: ItemId, delta: i32 },
+    Move {
+        id: ItemId,
+        delta: i32,
+    },
     /// Begin/continue processing the queue in order.
     Start,
     /// Pause the active console task and stop auto-advance.
@@ -149,7 +156,9 @@ pub fn spawn_with(settings: Settings, data_dir: Option<PathBuf>) -> EngineHandle
 
 #[derive(Debug)]
 enum Internal {
-    ScanDone { files: Vec<PathBuf> },
+    ScanDone {
+        files: Vec<PathBuf>,
+    },
     ParseDone {
         results: Vec<(ItemId, PartId, Result<crate::model::PkgInfo, pkg::PkgError>)>,
     },
@@ -287,7 +296,10 @@ impl EngineInner {
                         item.updated_at = unix_ms();
                     }
                     self.persist_queue();
-                    self.log(LogLevel::Info, "Paused (console task paused; auto-advance off)");
+                    self.log(
+                        LogLevel::Info,
+                        "Paused (console task paused; auto-advance off)",
+                    );
                 }
             }
             Command::Resume => {
@@ -312,16 +324,17 @@ impl EngineInner {
             }
             Command::MarkCompleted(id) => {
                 if let Some(item) = self.queue.get_mut(id)
-                    && item.state == ItemState::Unknown {
-                        item.state = ItemState::Completed;
-                        item.error = None;
-                        item.updated_at = unix_ms();
-                        self.persist_queue();
-                        self.log(
-                            LogLevel::Info,
-                            format!("Item #{id} marked completed by user (was unknown)"),
-                        );
-                    }
+                    && item.state == ItemState::Unknown
+                {
+                    item.state = ItemState::Completed;
+                    item.error = None;
+                    item.updated_at = unix_ms();
+                    self.persist_queue();
+                    self.log(
+                        LogLevel::Info,
+                        format!("Item #{id} marked completed by user (was unknown)"),
+                    );
+                }
             }
             Command::Cancel(id) => self.cmd_cancel(id).await,
             Command::ClearFinished => {
@@ -339,7 +352,10 @@ impl EngineInner {
                     }
                 }
                 self.persist_queue();
-                self.log(LogLevel::Info, format!("Cleared {removed} finished item(s)"));
+                self.log(
+                    LogLevel::Info,
+                    format!("Cleared {removed} finished item(s)"),
+                );
             }
             Command::Connect(addr) => self.cmd_connect(addr).await,
             Command::Disconnect => {
@@ -392,7 +408,16 @@ impl EngineInner {
                 }
             }
             self.persist_queue();
-            self.log(LogLevel::Info, format!("Removed item #{} ({})", item.id, item.primary_part().map(|p| p.file_name.clone()).unwrap_or_default()));
+            self.log(
+                LogLevel::Info,
+                format!(
+                    "Removed item #{} ({})",
+                    item.id,
+                    item.primary_part()
+                        .map(|p| p.file_name.clone())
+                        .unwrap_or_default()
+                ),
+            );
         }
     }
 
@@ -410,11 +435,12 @@ impl EngineInner {
                 );
             }
         } else if let Some(item) = self.queue.get_mut(id)
-            && !item.state.is_active() {
-                item.state = ItemState::Cancelled;
-                item.updated_at = unix_ms();
-                self.persist_queue();
-            }
+            && !item.state.is_active()
+        {
+            item.state = ItemState::Cancelled;
+            item.updated_at = unix_ms();
+            self.persist_queue();
+        }
         self.maybe_start_next().await;
     }
 
@@ -467,17 +493,18 @@ impl EngineInner {
             Internal::ParseDone { results } => {
                 for (item_id, part_id, result) in results {
                     if let Some(item) = self.queue.get_mut(item_id)
-                        && let Some(part) = item.parts.iter_mut().find(|p| p.id == part_id) {
-                            match result {
-                                Ok(info) => {
-                                    part.pkg = Some(info);
-                                    part.invalid_reason = None;
-                                }
-                                Err(e) => {
-                                    part.invalid_reason = Some(e.to_string());
-                                }
+                        && let Some(part) = item.parts.iter_mut().find(|p| p.id == part_id)
+                    {
+                        match result {
+                            Ok(info) => {
+                                part.pkg = Some(info);
+                                part.invalid_reason = None;
+                            }
+                            Err(e) => {
+                                part.invalid_reason = Some(e.to_string());
                             }
                         }
+                    }
                 }
                 self.finalize_parse().await;
                 self.persist_queue();
@@ -506,7 +533,10 @@ impl EngineInner {
                 if found.is_empty() {
                     self.log(LogLevel::Warn, "No consoles found on the local network");
                 } else {
-                    self.log(LogLevel::Info, format!("Discovery: {} console(s)", found.len()));
+                    self.log(
+                        LogLevel::Info,
+                        format!("Discovery: {} console(s)", found.len()),
+                    );
                 }
                 let _ = self.evt.send(Event::DiscoveryDone(found));
             }
@@ -541,7 +571,11 @@ impl EngineInner {
                         let backoff = Duration::from_secs(1u64 << attempts);
                         self.log(
                             LogLevel::Warn,
-                            format!("Submit failed ({e}); retrying in {backoff:?} (attempt {}/{})", attempts + 2, MAX_SUBMIT_ATTEMPTS),
+                            format!(
+                                "Submit failed ({e}); retrying in {backoff:?} (attempt {}/{})",
+                                attempts + 2,
+                                MAX_SUBMIT_ATTEMPTS
+                            ),
                         );
                         let tx = self.internal_tx.clone();
                         tokio::spawn(async move {
@@ -582,7 +616,9 @@ impl EngineInner {
         // Multipart consistency + invalid flagging.
         let ids: Vec<ItemId> = self.queue.items().iter().map(|i| i.id).collect();
         for id in ids {
-            let Some(item) = self.queue.get_mut(id) else { continue };
+            let Some(item) = self.queue.get_mut(id) else {
+                continue;
+            };
             if item.state.is_finished() {
                 continue;
             }
@@ -622,7 +658,8 @@ impl EngineInner {
                 let idxs: Vec<u32> = item.parts.iter().filter_map(|p| p.part_index).collect();
                 let expected: Vec<u32> = (0..idxs.len() as u32).collect();
                 if idxs != expected {
-                    item.error = Some("Multipart pieces are not consecutive — a part seems missing".into());
+                    item.error =
+                        Some("Multipart pieces are not consecutive — a part seems missing".into());
                     if matches!(item.state, ItemState::Queued | ItemState::Preparing) {
                         item.state = ItemState::Invalid;
                     }
@@ -633,13 +670,17 @@ impl EngineInner {
         // Duplicate content ids among live items → mark later ones invalid.
         for (_first, dup) in self.queue.duplicates_by_content_id() {
             if let Some(item) = self.queue.get_mut(dup)
-                && matches!(item.state, ItemState::Queued | ItemState::Preparing) {
-                    item.state = ItemState::Invalid;
-                    item.error = Some(format!(
-                        "Duplicate content id — same package is already queued (item #{_first})"
-                    ));
-                    self.log(LogLevel::Warn, format!("Duplicate content id on item #{dup}"));
-                }
+                && matches!(item.state, ItemState::Queued | ItemState::Preparing)
+            {
+                item.state = ItemState::Invalid;
+                item.error = Some(format!(
+                    "Duplicate content id — same package is already queued (item #{_first})"
+                ));
+                self.log(
+                    LogLevel::Warn,
+                    format!("Duplicate content id on item #{dup}"),
+                );
+            }
         }
     }
 
@@ -712,7 +753,9 @@ impl EngineInner {
                 self.log(LogLevel::Error, format!("Item #{id}: source file is gone"));
                 continue; // try the next queued item
             }
-            let Some(urls) = self.rebuild_urls(id) else { return };
+            let Some(urls) = self.rebuild_urls(id) else {
+                return;
+            };
             if let Some(item) = self.queue.get_mut(id) {
                 item.state = ItemState::Submitting;
                 item.updated_at = unix_ms();
@@ -730,7 +773,9 @@ impl EngineInner {
     // -- progress -------------------------------------------------------------
 
     fn spawn_poller(&mut self, item: ItemId, task_id: i64) {
-        let Some(client) = self.client.clone() else { return };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         self.active = Some(ActiveTask {
             item_id: item,
@@ -759,7 +804,9 @@ impl EngineInner {
     }
 
     async fn handle_progress(&mut self, item: ItemId, result: Result<ProgressView, RpiError>) {
-        let Some(active) = self.active.as_ref() else { return };
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
         if active.item_id != item {
             return; // stale poll for a task we no longer track
         }
@@ -783,13 +830,16 @@ impl EngineInner {
                 let copy = pv.local_copy_percent;
                 let err = pv.raw_error;
 
-                let Some(it) = self.queue.get_mut(item) else { return };
+                let Some(it) = self.queue.get_mut(item) else {
+                    return;
+                };
                 it.progress = Some(pv);
                 it.updated_at = unix_ms();
 
                 if err != 0 {
                     // Console-side failure with evidence.
-                    let gloss = crate::rpi::explain_error_code(err).unwrap_or("unknown console error");
+                    let gloss =
+                        crate::rpi::explain_error_code(err).unwrap_or("unknown console error");
                     it.state = ItemState::Failed;
                     it.error = Some(format!("console error 0x{err:X}: {gloss}"));
                     self.stop_poller_and_continue().await;
@@ -900,10 +950,8 @@ impl EngineInner {
     fn remember_console(&mut self, addr: SocketAddr) {
         let mut s = self.settings.lock().unwrap();
         s.remembered.retain(|r| r.addr != addr);
-        s.remembered.insert(
-            0,
-            RememberedConsole { addr, label: None },
-        );
+        s.remembered
+            .insert(0, RememberedConsole { addr, label: None });
         if s.remembered.len() > 8 {
             s.remembered.truncate(8);
         }
@@ -925,7 +973,10 @@ impl EngineInner {
                 let s = Arc::new(server);
                 self.log(
                     LogLevel::Info,
-                    format!("Serving packages from {} (console downloads from here)", s.base_url),
+                    format!(
+                        "Serving packages from {} (console downloads from here)",
+                        s.base_url
+                    ),
                 );
                 if bind_ip.is_unspecified() {
                     self.log(
@@ -963,40 +1014,44 @@ impl EngineInner {
             })
             .collect();
         for (id, task_id, content_id, sub_type) in items {
-            let Some(client) = self.client.clone() else { return };
+            let Some(client) = self.client.clone() else {
+                return;
+            };
             // Prefer find_task (content-id based) for fresh evidence.
             if let Some(cid) = &content_id
-                && let Ok(found) = client.find_task(cid, sub_type).await {
-                    let tid = found.task_id;
-                    if let Some(it) = self.queue.get_mut(id) {
-                        it.task_id = Some(tid);
-                        it.state = ItemState::Transferring;
-                        it.error = None;
-                    }
-                    self.spawn_poller(id, tid);
-                    self.log(
-                        LogLevel::Info,
-                        format!("Re-attached item #{id} to console task {tid}"),
-                    );
-                    continue;
+                && let Ok(found) = client.find_task(cid, sub_type).await
+            {
+                let tid = found.task_id;
+                if let Some(it) = self.queue.get_mut(id) {
+                    it.task_id = Some(tid);
+                    it.state = ItemState::Transferring;
+                    it.error = None;
                 }
+                self.spawn_poller(id, tid);
+                self.log(
+                    LogLevel::Info,
+                    format!("Re-attached item #{id} to console task {tid}"),
+                );
+                continue;
+            }
             if let (Some(tid), None) = (task_id, content_id.as_ref()) {
                 // No content id but a task id: probe progress once.
                 if let Ok(pv) = client.task_progress(tid).await
-                    && pv.raw_error == 0 {
-                        if let Some(it) = self.queue.get_mut(id) {
-                            it.state = if pv.local_copy_percent >= 100 {
-                                ItemState::Completed
-                            } else if pv.transferred >= pv.total && pv.total > 0 {
-                                ItemState::Installing
-                            } else {
-                                ItemState::Transferring
-                            };
-                            it.progress = Some(pv);
-                        }
-                        self.spawn_poller(id, tid);
-                        continue;
+                    && pv.raw_error == 0
+                {
+                    if let Some(it) = self.queue.get_mut(id) {
+                        it.state = if pv.local_copy_percent >= 100 {
+                            ItemState::Completed
+                        } else if pv.transferred >= pv.total && pv.total > 0 {
+                            ItemState::Installing
+                        } else {
+                            ItemState::Transferring
+                        };
+                        it.progress = Some(pv);
                     }
+                    self.spawn_poller(id, tid);
+                    continue;
+                }
             }
             // Task unknown to the console: leave as Unknown with a hint.
             if let Some(it) = self.queue.get_mut(id) {
@@ -1057,27 +1112,35 @@ fn pick_bind_ip(console_ip: IpAddr) -> IpAddr {
         if net.prefix > 31 {
             continue;
         }
-        let IpAddr::V4(target) = console_ip else { break };
+        let IpAddr::V4(target) = console_ip else {
+            break;
+        };
         let t = u32::from_be_bytes(target.octets());
-        let mask = if net.prefix == 0 { 0 } else { u32::MAX << (32 - net.prefix) };
+        let mask = if net.prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - net.prefix)
+        };
         if (t & mask) == net.network
-            && let Ok(ifaces) = if_addrs::get_if_addrs() {
-                for iface in ifaces {
-                    if let IpAddr::V4(v4) = iface.ip() {
-                        let a = u32::from_be_bytes(v4.octets());
-                        if (a & mask) == net.network && !v4.is_loopback() {
-                            return IpAddr::V4(v4);
-                        }
+            && let Ok(ifaces) = if_addrs::get_if_addrs()
+        {
+            for iface in ifaces {
+                if let IpAddr::V4(v4) = iface.ip() {
+                    let a = u32::from_be_bytes(v4.octets());
+                    if (a & mask) == net.network && !v4.is_loopback() {
+                        return IpAddr::V4(v4);
                     }
                 }
             }
+        }
     }
     if let Ok(ifaces) = if_addrs::get_if_addrs() {
         for iface in ifaces {
             if let IpAddr::V4(v4) = iface.ip()
-                && !v4.is_loopback() {
-                    return IpAddr::V4(v4);
-                }
+                && !v4.is_loopback()
+            {
+                return IpAddr::V4(v4);
+            }
         }
     }
     IpAddr::from([0, 0, 0, 0])
@@ -1107,7 +1170,12 @@ fn walk_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if recursive && path.file_name().map(|n| !n.to_string_lossy().starts_with('.')).unwrap_or(true) {
+            if recursive
+                && path
+                    .file_name()
+                    .map(|n| !n.to_string_lossy().starts_with('.'))
+                    .unwrap_or(true)
+            {
                 walk_dir(&path, recursive, out);
             }
         } else if is_pkg(&path) {

@@ -30,7 +30,10 @@ pub fn pick_pkg_files() -> DialogPick {
     std::thread::Builder::new()
         .name("rpi-ng-dialog".into())
         .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
                 let _ = tx.send(DialogOutcome::Cancelled);
                 return;
             };
@@ -59,7 +62,10 @@ pub fn pick_folder() -> DialogPick {
     std::thread::Builder::new()
         .name("rpi-ng-dialog".into())
         .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
                 let _ = tx.send(DialogOutcome::Cancelled);
                 return;
             };
