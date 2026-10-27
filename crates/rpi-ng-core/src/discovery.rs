@@ -119,11 +119,10 @@ pub async fn discover(settings: &Settings) -> Vec<ConsoleCandidate> {
         .map(|rc| rc.addr)
         .collect();
     for addr in remembered {
-        if seen_ips.insert(addr.ip()) {
-            if let Some(c) = verify_addr(addr, DiscoverySource::Remembered).await {
+        if seen_ips.insert(addr.ip())
+            && let Some(c) = verify_addr(addr, DiscoverySource::Remembered).await {
                 candidates.push(c);
             }
-        }
     }
 
     // 2. Bounded subnet sweep.

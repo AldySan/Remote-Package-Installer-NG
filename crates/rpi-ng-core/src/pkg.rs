@@ -85,7 +85,7 @@ pub fn parse_pkg(file: &mut File, file_size: u64) -> Result<PkgInfo, PkgError> {
     }
     let entry_table_size = entry_count as u64 * ENTRY_SIZE as u64;
     if entry_table_offset < HEADER_SIZE as u64
-        || entry_table_offset.checked_add(entry_table_size).unwrap_or(u64::MAX) > file_size
+        || entry_table_offset.saturating_add(entry_table_size) > file_size
     {
         return Err(PkgError::EntryTableOffset(entry_table_offset));
     }
@@ -105,7 +105,7 @@ pub fn parse_pkg(file: &mut File, file_size: u64) -> Result<PkgInfo, PkgError> {
             if size == 0 || size > MAX_SFO_SIZE {
                 return Err(PkgError::SfoTooLarge(size));
             }
-            if offset.checked_add(size as u64).unwrap_or(u64::MAX) > file_size {
+            if offset.saturating_add(size as u64) > file_size {
                 return Err(PkgError::EntryTableOffset(offset));
             }
             sfo_off = Some((offset, size));

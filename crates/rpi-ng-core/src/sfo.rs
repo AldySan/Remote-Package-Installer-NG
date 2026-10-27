@@ -152,11 +152,10 @@ impl Sfo {
     /// Localized title: prefers `TITLE_XX` for `lang_id`, falls back to `TITLE`.
     pub fn title(&self, lang_id: u8) -> Option<String> {
         let localized = format!("TITLE_{lang_id:02}");
-        if let Some(t) = self.get_str(&localized) {
-            if !t.is_empty() {
+        if let Some(t) = self.get_str(&localized)
+            && !t.is_empty() {
                 return Some(t.to_string());
             }
-        }
         self.get_str("TITLE").map(|t| t.to_string())
     }
 

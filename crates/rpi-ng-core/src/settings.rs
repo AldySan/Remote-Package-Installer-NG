@@ -127,11 +127,10 @@ impl From<SettingsDoc> for Settings {
 /// Where settings/queue documents live (per-OS user data dir).
 /// Overridable with `RPI_NG_DATA_DIR` (used by tests and headless runs).
 pub fn data_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("RPI_NG_DATA_DIR") {
-        if !dir.is_empty() {
+    if let Ok(dir) = std::env::var("RPI_NG_DATA_DIR")
+        && !dir.is_empty() {
             return Some(PathBuf::from(dir));
         }
-    }
     directories::ProjectDirs::from("", "", "rpi-ng").map(|d| d.data_dir().to_path_buf())
 }
 
@@ -146,11 +145,10 @@ impl Settings {
         };
         let path = dir.join("settings.json");
         for candidate in [&path, &dir.join("settings.json.bak")] {
-            if let Ok(text) = std::fs::read_to_string(candidate) {
-                if let Ok(doc) = serde_json::from_str::<SettingsDoc>(&text) {
+            if let Ok(text) = std::fs::read_to_string(candidate)
+                && let Ok(doc) = serde_json::from_str::<SettingsDoc>(&text) {
                     return doc.into();
                 }
-            }
         }
         Self::default()
     }

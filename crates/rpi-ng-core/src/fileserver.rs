@@ -246,11 +246,10 @@ async fn serve_inner(
         return builder.body(Body::empty()).unwrap();
     }
 
-    if offset > 0 {
-        if file.seek(SeekFrom::Start(offset)).await.is_err() {
+    if offset > 0
+        && file.seek(SeekFrom::Start(offset)).await.is_err() {
             return not_found();
         }
-    }
     // Stream exactly `length` bytes in bounded chunks.
     let stream = ReaderStream::with_capacity(file.take(length), 64 * 1024);
     let body = Body::from_stream(stream);

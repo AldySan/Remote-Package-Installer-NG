@@ -241,11 +241,10 @@ pub struct PartFile {
 
 impl PartFile {
     pub fn display_title(&self) -> String {
-        if let Some(pkg) = &self.pkg {
-            if let Some(t) = &pkg.title {
+        if let Some(pkg) = &self.pkg
+            && let Some(t) = &pkg.title {
                 return t.clone();
             }
-        }
         self.file_name.clone()
     }
 

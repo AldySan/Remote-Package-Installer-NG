@@ -126,7 +126,7 @@ impl RpiClient {
             // Give the is_exists round-trip one chance to prove RPI anyway
             // (defensive against slight dialect differences).
             let exists = self.is_exists("PROBE00000").await;
-            let ok = matches!(exists, Ok(_));
+            let ok = exists.is_ok();
             if !ok {
                 return Err(RpiError::Network("endpoint did not answer the RPI probes".into()));
             }
@@ -134,15 +134,12 @@ impl RpiClient {
 
         // (2) /api/status — newer receivers answer {"busy":...}; old ones HTML.
         let mut caps = BackendCaps::default();
-        if let Ok(resp) = self.http.get(format!("{}/api/status", self.base)).send().await {
-            if let Ok(text) = resp.text().await {
-                if text.contains("busy") {
-                    if serde_json::from_str::<StatusResponse>(json_fix::repair(&text).as_str()).is_ok() {
+        if let Ok(resp) = self.http.get(format!("{}/api/status", self.base)).send().await
+            && let Ok(text) = resp.text().await
+                && text.contains("busy")
+                    && serde_json::from_str::<StatusResponse>(json_fix::repair(&text).as_str()).is_ok() {
                         caps.status_endpoint = true;
                     }
-                }
-            }
-        }
 
         // (3) Full request/response path validation (read-only API call).
         match self.is_exists("PROBE00000").await {

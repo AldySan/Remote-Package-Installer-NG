@@ -311,8 +311,8 @@ impl EngineInner {
                 }
             }
             Command::MarkCompleted(id) => {
-                if let Some(item) = self.queue.get_mut(id) {
-                    if item.state == ItemState::Unknown {
+                if let Some(item) = self.queue.get_mut(id)
+                    && item.state == ItemState::Unknown {
                         item.state = ItemState::Completed;
                         item.error = None;
                         item.updated_at = unix_ms();
@@ -322,7 +322,6 @@ impl EngineInner {
                             format!("Item #{id} marked completed by user (was unknown)"),
                         );
                     }
-                }
             }
             Command::Cancel(id) => self.cmd_cancel(id).await,
             Command::ClearFinished => {
@@ -410,13 +409,12 @@ impl EngineInner {
                     format!("Cancelled item #{id}; remote task {task_id} stop/unregister was best-effort — verify on the console if it still appears"),
                 );
             }
-        } else if let Some(item) = self.queue.get_mut(id) {
-            if !item.state.is_active() {
+        } else if let Some(item) = self.queue.get_mut(id)
+            && !item.state.is_active() {
                 item.state = ItemState::Cancelled;
                 item.updated_at = unix_ms();
                 self.persist_queue();
             }
-        }
         self.maybe_start_next().await;
     }
 
@@ -468,8 +466,8 @@ impl EngineInner {
             }
             Internal::ParseDone { results } => {
                 for (item_id, part_id, result) in results {
-                    if let Some(item) = self.queue.get_mut(item_id) {
-                        if let Some(part) = item.parts.iter_mut().find(|p| p.id == part_id) {
+                    if let Some(item) = self.queue.get_mut(item_id)
+                        && let Some(part) = item.parts.iter_mut().find(|p| p.id == part_id) {
                             match result {
                                 Ok(info) => {
                                     part.pkg = Some(info);
@@ -480,7 +478,6 @@ impl EngineInner {
                                 }
                             }
                         }
-                    }
                 }
                 self.finalize_parse().await;
                 self.persist_queue();
@@ -635,15 +632,14 @@ impl EngineInner {
 
         // Duplicate content ids among live items → mark later ones invalid.
         for (_first, dup) in self.queue.duplicates_by_content_id() {
-            if let Some(item) = self.queue.get_mut(dup) {
-                if matches!(item.state, ItemState::Queued | ItemState::Preparing) {
+            if let Some(item) = self.queue.get_mut(dup)
+                && matches!(item.state, ItemState::Queued | ItemState::Preparing) {
                     item.state = ItemState::Invalid;
                     item.error = Some(format!(
                         "Duplicate content id — same package is already queued (item #{_first})"
                     ));
                     self.log(LogLevel::Warn, format!("Duplicate content id on item #{dup}"));
                 }
-            }
         }
     }
 
@@ -969,8 +965,8 @@ impl EngineInner {
         for (id, task_id, content_id, sub_type) in items {
             let Some(client) = self.client.clone() else { return };
             // Prefer find_task (content-id based) for fresh evidence.
-            if let Some(cid) = &content_id {
-                if let Ok(found) = client.find_task(cid, sub_type).await {
+            if let Some(cid) = &content_id
+                && let Ok(found) = client.find_task(cid, sub_type).await {
                     let tid = found.task_id;
                     if let Some(it) = self.queue.get_mut(id) {
                         it.task_id = Some(tid);
@@ -984,11 +980,10 @@ impl EngineInner {
                     );
                     continue;
                 }
-            }
             if let (Some(tid), None) = (task_id, content_id.as_ref()) {
                 // No content id but a task id: probe progress once.
-                if let Ok(pv) = client.task_progress(tid).await {
-                    if pv.raw_error == 0 {
+                if let Ok(pv) = client.task_progress(tid).await
+                    && pv.raw_error == 0 {
                         if let Some(it) = self.queue.get_mut(id) {
                             it.state = if pv.local_copy_percent >= 100 {
                                 ItemState::Completed
@@ -1002,7 +997,6 @@ impl EngineInner {
                         self.spawn_poller(id, tid);
                         continue;
                     }
-                }
             }
             // Task unknown to the console: leave as Unknown with a hint.
             if let Some(it) = self.queue.get_mut(id) {
@@ -1066,8 +1060,8 @@ fn pick_bind_ip(console_ip: IpAddr) -> IpAddr {
         let IpAddr::V4(target) = console_ip else { break };
         let t = u32::from_be_bytes(target.octets());
         let mask = if net.prefix == 0 { 0 } else { u32::MAX << (32 - net.prefix) };
-        if (t & mask) == net.network {
-            if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        if (t & mask) == net.network
+            && let Ok(ifaces) = if_addrs::get_if_addrs() {
                 for iface in ifaces {
                     if let IpAddr::V4(v4) = iface.ip() {
                         let a = u32::from_be_bytes(v4.octets());
@@ -1077,15 +1071,13 @@ fn pick_bind_ip(console_ip: IpAddr) -> IpAddr {
                     }
                 }
             }
-        }
     }
     if let Ok(ifaces) = if_addrs::get_if_addrs() {
         for iface in ifaces {
-            if let IpAddr::V4(v4) = iface.ip() {
-                if !v4.is_loopback() {
+            if let IpAddr::V4(v4) = iface.ip()
+                && !v4.is_loopback() {
                     return IpAddr::V4(v4);
                 }
-            }
         }
     }
     IpAddr::from([0, 0, 0, 0])

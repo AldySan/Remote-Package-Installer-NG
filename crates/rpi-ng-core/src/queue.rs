@@ -11,7 +11,7 @@ use std::{collections::HashSet, path::{Path, PathBuf}};
 use crate::{
     model::{unix_ms, ItemId, ItemState, PartFile, PartId, QueueItem},
     pkg,
-    settings::{atomic_write, data_dir},
+    settings::atomic_write,
 };
 
 const QUEUE_FILE: &str = "queue.json";
@@ -44,11 +44,10 @@ impl Queue {
             return Self::default();
         };
         for candidate in [dir.join(QUEUE_FILE), dir.join(QUEUE_BAK)] {
-            if let Ok(text) = std::fs::read_to_string(&candidate) {
-                if let Ok(doc) = serde_json::from_str::<QueueDoc>(&text) {
+            if let Ok(text) = std::fs::read_to_string(&candidate)
+                && let Ok(doc) = serde_json::from_str::<QueueDoc>(&text) {
                     return Self::from_doc(doc);
                 }
-            }
         }
         Self::default()
     }

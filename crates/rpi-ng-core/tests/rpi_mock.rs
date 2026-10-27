@@ -23,7 +23,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use rpi_ng_core::{
-    engine::{spawn, Command},
+    engine::Command,
     model::{Event, ItemState, Snapshot},
     rpi::{RpiClient, RpiError},
     settings::Settings,
@@ -497,11 +497,10 @@ async fn wait_for_snapshot(
                 last = Some(s);
             }
         }
-        if let Some(s) = &last {
-            if cond(s) {
+        if let Some(s) = &last
+            && cond(s) {
                 return s.clone();
             }
-        }
         if tokio::time::Instant::now() >= deadline {
             panic!("timeout waiting for snapshot condition; last={last:?}");
         }
@@ -520,9 +519,11 @@ async fn engine_end_to_end_flow_completes_with_evidence() {
     );
 
     let mock = MockConsole::start(Dialect::BrokenHex).await;
-    let mut settings = Settings::default();
-    settings.poll_interval = Duration::from_millis(30);
-    settings.discovery_enabled = false;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
 
     let handle = rpi_ng_core::engine::spawn_with(
         settings,
@@ -600,9 +601,11 @@ async fn engine_marks_failed_on_console_error() {
     // with a console-side error before it completes.
     mock.state.lock().unwrap().step = 4096;
 
-    let mut settings = Settings::default();
-    settings.poll_interval = Duration::from_millis(30);
-    settings.discovery_enabled = false;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
     let handle = rpi_ng_core::engine::spawn_with(
         settings,
         Some(data_dir.path().to_path_buf()),

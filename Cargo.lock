@@ -3060,6 +3060,7 @@ dependencies = [
  "eframe",
  "rfd",
  "rpi-ng-core",
+ "tokio",
 ]
 
 [[package]]

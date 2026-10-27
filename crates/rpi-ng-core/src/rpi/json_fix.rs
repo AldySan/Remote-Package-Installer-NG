@@ -98,7 +98,7 @@ mod tests {
     fn repairs_error_code_hex() {
         let raw = r#"{ "status": "fail", "error_code": 0x80990005 }"#;
         let v: serde_json::Value = serde_json::from_str(&repair(raw)).unwrap();
-        assert_eq!(v["error_code"], 0x80990005u64 as u64);
+        assert_eq!(v["error_code"], 0x8099_0005_u64);
     }
 
     #[test]
