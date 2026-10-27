@@ -65,6 +65,9 @@ struct MockState {
     by_content: std::collections::HashMap<String, i64>,
     /// When set, install answers with this failure code.
     fail_installs: Option<i64>,
+    /// When set, install answers success WITHOUT a task id (v3.x fork
+    /// dialect).
+    omit_task_id: bool,
 }
 
 struct MockConsole {
@@ -83,6 +86,7 @@ impl MockConsole {
             installs: Vec::new(),
             by_content: Default::default(),
             fail_installs: None,
+            omit_task_id: false,
         }));
         let app = Router::new()
             .route("/api", get(unsupported))
@@ -198,6 +202,9 @@ async fn install(State(state): State<Arc<Mutex<MockState>>>, Json(body): Json<Va
     );
     st.by_content
         .insert(format!("CONTENT-ID-{task_id}"), task_id);
+    if st.omit_task_id {
+        return Json(json!({"status": "success"})).into_response();
+    }
     Json(json!({"status": "success", "task_id": task_id, "title": "Mock Game"})).into_response()
 }
 
@@ -826,5 +833,255 @@ async fn engine_submits_restored_queue_with_unaligned_part_ids() {
         0,
         "part id must be the server registration"
     );
+    handle.shutdown();
+}
+
+/// Pausing must stick: the console keeps reporting progress for a paused
+/// task, and the poller must not overwrite the user's Paused state with
+/// Transferring on every poll. Completing still applies.
+#[tokio::test]
+async fn engine_pause_survives_progress_polls() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA11111_00-PAUSEPKG00000000.pkg",
+        "UP0001-CUSA11111_00-PAUSEPKG00000000",
+    );
+
+    let mock = MockConsole::start(Dialect::Strict).await;
+    mock.state.lock().unwrap().step = 4096; // keep the transfer slow
+    let settings = Settings {
+        poll_interval: Duration::from_millis(25),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(20),
+    )
+    .await;
+    let item_id = snap.items[0].id;
+
+    // Pause mid-transfer.
+    handle.send(Command::Pause);
+
+    // Several progress polls arrive while paused — the state must stay Paused.
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Paused)
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        snap.items
+            .iter()
+            .any(|i| i.id == item_id && i.state == ItemState::Paused)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut paused_stuck = false;
+    for ev in handle.poll_events() {
+        if let Event::Snapshot(s) = ev
+            && s.items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Transferring)
+        {
+            paused_stuck = true;
+        }
+    }
+    assert!(!paused_stuck, "poller must not overwrite the Paused state");
+
+    // Resume finishes the install.
+    handle.send(Command::Resume);
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Completed)
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+    handle.shutdown();
+}
+
+/// Disconnecting mid-transfer must not leave an orphaned Transferring item:
+/// it becomes Unknown, and a reconnect re-attaches to the console task via
+/// find_task and drives it to completion.
+#[tokio::test]
+async fn engine_disconnect_marks_inflight_unknown_and_reattaches() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA22222_00-DISCONNECTPKG0.pkg",
+        "UP0001-CUSA22222_00-DISCONNECTPKG0",
+    );
+
+    let mock = MockConsole::start(Dialect::Strict).await;
+    mock.state.lock().unwrap().step = 4096;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(25),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(20),
+    )
+    .await;
+    let item_id = snap.items[0].id;
+    let task_id = snap.items[0].task_id.unwrap();
+
+    // Teach the mock find_task for the real content id, like a real console
+    // would report it after accepting the install.
+    mock.state
+        .lock()
+        .unwrap()
+        .by_content
+        .insert("UP0001-CUSA22222_00-DISCONNECTPKG0".into(), task_id);
+
+    // Drop the connection mid-flight.
+    handle.send(Command::Disconnect);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Unknown)
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    let item = snap.items.iter().find(|i| i.id == item_id).unwrap();
+    assert!(item.error.is_some(), "unknown outcome needs a hint");
+
+    // Reconnect: reconcile must re-attach to the console task and finish it.
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Completed)
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+    handle.shutdown();
+}
+
+/// A backend that accepts the install but answers without a task id (some
+/// v3.x forks) must surface as Unknown — an untrackable outcome the user
+/// verifies — not as Failed, which would claim the install never happened.
+#[tokio::test]
+async fn engine_install_without_task_id_is_unknown_not_failed() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA33333_00-NOIDPKG000000000.pkg",
+        "UP0001-CUSA33333_00-NOIDPKG000000000",
+    );
+
+    let mock = MockConsole::start(Dialect::Strict).await;
+    mock.state.lock().unwrap().omit_task_id = true;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| matches!(i.state, ItemState::Unknown | ItemState::Failed))
+        },
+        Duration::from_secs(20),
+    )
+    .await;
+    let item = &snap.items[0];
+    assert_eq!(
+        item.state,
+        ItemState::Unknown,
+        "accepted-but-untrackable installs are unknown outcomes, not failures"
+    );
+    assert!(item.error.as_deref().unwrap().contains("task id"));
+    // The console did accept the request.
+    assert_eq!(mock.installs().len(), 1);
     handle.shutdown();
 }

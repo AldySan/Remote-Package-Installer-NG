@@ -224,7 +224,7 @@ fn item_row(app: &mut App, ui: &mut egui::Ui, item: &QueueItem) {
         let active = state.is_active();
         if state == ItemState::Paused {
             if ui.small_button("Resume").clicked() {
-                app.send(rpi_ng_core::Command::Resume);
+                app.send(rpi_ng_core::Command::ResumeItem(id));
             }
         } else if active && ui.small_button("Pause").clicked() {
             app.send(rpi_ng_core::Command::Pause);

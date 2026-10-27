@@ -46,6 +46,8 @@ pub enum Command {
     Pause,
     /// Resume the paused console task and auto-advance.
     Resume,
+    /// Resume one specific paused item (per-row action).
+    ResumeItem(ItemId),
     /// Requeue a finished/failed/cancelled/unknown item.
     Retry(ItemId),
     /// User-verified completion for an `Unknown` item (honest escape hatch).
@@ -290,6 +292,8 @@ impl EngineInner {
                 self.running = false;
                 let ids = self.active.as_ref().map(|a| (a.task_id, a.item_id));
                 if let Some((task_id, item_id)) = ids {
+                    // Best-effort remote pause; the poller keeps watching so a
+                    // completion or console-side error is still observed.
                     self.pause_remote(task_id).await;
                     if let Some(item) = self.queue.get_mut(item_id) {
                         item.state = ItemState::Paused;
@@ -298,21 +302,28 @@ impl EngineInner {
                     self.persist_queue();
                     self.log(
                         LogLevel::Info,
-                        "Paused (console task paused; auto-advance off)",
+                        "Paused (console pause was best-effort; auto-advance off)",
                     );
                 }
             }
             Command::Resume => {
-                self.running = true;
-                let ids = self.active.as_ref().map(|a| (a.task_id, a.item_id));
-                if let Some((task_id, item_id)) = ids {
-                    self.resume_remote(task_id).await;
-                    if let Some(item) = self.queue.get_mut(item_id) {
-                        item.state = ItemState::Transferring;
-                        item.updated_at = unix_ms();
-                    }
-                    self.persist_queue();
+                // Prefer the actively monitored task; otherwise resume the
+                // first paused item that still carries a console task id
+                // (e.g. after a reconnect).
+                let target = self.active.as_ref().map(|a| a.item_id).or_else(|| {
+                    self.queue
+                        .items()
+                        .iter()
+                        .find(|i| i.state == ItemState::Paused && i.task_id.is_some())
+                        .map(|i| i.id)
+                });
+                if let Some(id) = target {
+                    self.resume_item(id).await;
                 }
+                self.maybe_start_next().await;
+            }
+            Command::ResumeItem(id) => {
+                self.resume_item(id).await;
                 self.maybe_start_next().await;
             }
             Command::Retry(id) => {
@@ -366,7 +377,43 @@ impl EngineInner {
                 if let Some(server) = self.server.take() {
                     server.shutdown();
                 }
-                self.log(LogLevel::Info, "Disconnected");
+                // Items that were in flight can no longer be observed. Mark
+                // them Unknown (never auto-resubmitted); reconcile() re-attaches
+                // to console tasks on the next connect. Paused items keep their
+                // task id and are resumable explicitly.
+                let inflight: Vec<ItemId> = self
+                    .queue
+                    .items()
+                    .iter()
+                    .filter(|i| {
+                        matches!(
+                            i.state,
+                            ItemState::Submitting | ItemState::Transferring | ItemState::Installing
+                        )
+                    })
+                    .map(|i| i.id)
+                    .collect();
+                for id in &inflight {
+                    if let Some(it) = self.queue.get_mut(*id) {
+                        it.state = ItemState::Unknown;
+                        it.error = Some(
+                            "Connection closed while this item was in flight — the outcome is unknown; reconnect to re-attach, then verify on the console".into(),
+                        );
+                        it.updated_at = unix_ms();
+                    }
+                }
+                if !inflight.is_empty() {
+                    self.persist_queue();
+                    self.log(
+                        LogLevel::Warn,
+                        format!(
+                            "Disconnected with {} in-flight item(s) marked unknown",
+                            inflight.len()
+                        ),
+                    );
+                } else {
+                    self.log(LogLevel::Info, "Disconnected");
+                }
             }
             Command::Discover => {
                 let settings = self.settings();
@@ -378,8 +425,14 @@ impl EngineInner {
                 });
             }
             Command::SetSettings(s) => {
-                *self.settings.lock().unwrap() = *s;
-                if let Err(e) = self.settings().save() {
+                let result = {
+                    let mut guard = self.settings.lock().unwrap();
+                    *guard = *s;
+                    // Persist into the engine's data dir (test/headless runs
+                    // must not touch the user's real settings).
+                    guard.save_in(self.data_dir.as_deref())
+                };
+                if let Err(e) = result {
                     self.log(LogLevel::Error, format!("settings save failed: {e}"));
                 }
             }
@@ -437,9 +490,24 @@ impl EngineInner {
         } else if let Some(item) = self.queue.get_mut(id)
             && !item.state.is_active()
         {
+            let task_id = item.task_id;
             item.state = ItemState::Cancelled;
             item.updated_at = unix_ms();
             self.persist_queue();
+            // A paused/unknown item may still hold a live console task:
+            // clean it up best-effort too.
+            if let Some(task_id) = task_id
+                && let Some(client) = self.client.clone()
+            {
+                let _ = client.stop_task(task_id).await;
+                let _ = client.unregister_task(task_id).await;
+                self.log(
+                    LogLevel::Warn,
+                    format!("Cancelled item #{id}; remote task {task_id} stop/unregister was best-effort — verify on the console if it still appears"),
+                );
+            } else {
+                self.log(LogLevel::Info, format!("Cancelled item #{id}"));
+            }
         }
         self.maybe_start_next().await;
     }
@@ -467,6 +535,12 @@ impl EngineInner {
         match msg {
             Internal::ScanDone { files } => {
                 self.scanning = false;
+                if files.len() >= MAX_WALK_FILES {
+                    self.log(
+                        LogLevel::Warn,
+                        format!("Scan capped at {MAX_WALK_FILES} files — some packages may be missing; add the rest from another folder"),
+                    );
+                }
                 let (added, skipped) = self.queue.add_paths(files);
                 for s in skipped {
                     self.log(LogLevel::Warn, format!("Skipped: {s}"));
@@ -540,60 +614,125 @@ impl EngineInner {
                 }
                 let _ = self.evt.send(Event::DiscoveryDone(found));
             }
-            Internal::SubmitResult { item, result } => match result {
-                Ok(resp) => {
-                    let task_id = resp.task_id;
-                    if let Some(it) = self.queue.get_mut(item) {
-                        it.task_id = Some(task_id);
-                        it.console_title = resp.title.clone();
-                        it.state = ItemState::Transferring;
-                        it.updated_at = unix_ms();
-                    }
-                    self.poll_failures = 0;
-                    self.copy_phase_stalls = 0;
-                    self.last_sample = None;
-                    self.spawn_poller(item, task_id);
-                    self.persist_queue();
-                    self.log(
-                        LogLevel::Info,
-                        format!("Console accepted item #{item} (task {task_id}) — downloading"),
-                    );
-                }
-                Err(e) => {
-                    let attempts = self.queue.get(item).map(|i| i.attempts).unwrap_or(0);
-                    let transient = e.is_transient();
-                    if transient && attempts + 1 < MAX_SUBMIT_ATTEMPTS {
-                        if let Some(it) = self.queue.get_mut(item) {
-                            it.attempts = attempts + 1;
-                            it.error = Some(e.to_string());
+            Internal::SubmitResult { item, result } => {
+                match result {
+                    Ok(resp) => {
+                        let task_id = resp.task_id;
+                        // The console may have answered after a disconnect or a
+                        // user cancel: never let a late response overwrite those
+                        // decisions.
+                        let still_submitting = self
+                            .queue
+                            .get(item)
+                            .map(|i| i.state == ItemState::Submitting)
+                            .unwrap_or(false);
+                        if !still_submitting {
+                            if let Some(it) = self.queue.get_mut(item)
+                                && it.state == ItemState::Unknown
+                                && task_id > 0
+                            {
+                                // Disconnected while the request was in flight;
+                                // remember the task id for reconcile().
+                                it.task_id = Some(task_id);
+                                it.updated_at = unix_ms();
+                                self.persist_queue();
+                            }
+                            // Cancelled/removed meanwhile: best-effort cleanup so the
+                            // console does not keep a ghost task.
+                            if task_id > 0
+                                && let Some(client) = self.client.clone()
+                            {
+                                let _ = client.stop_task(task_id).await;
+                                let _ = client.unregister_task(task_id).await;
+                            }
+                            return;
                         }
-                        let urls = self.rebuild_urls(item).unwrap_or_default();
-                        let backoff = Duration::from_secs(1u64 << attempts);
-                        self.log(
-                            LogLevel::Warn,
-                            format!(
-                                "Submit failed ({e}); retrying in {backoff:?} (attempt {}/{})",
-                                attempts + 2,
-                                MAX_SUBMIT_ATTEMPTS
-                            ),
-                        );
-                        let tx = self.internal_tx.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(backoff).await;
-                            let _ = tx.send(Internal::SubmitRetry { item, urls });
-                        });
-                    } else {
                         if let Some(it) = self.queue.get_mut(item) {
-                            it.state = ItemState::Failed;
-                            it.error = Some(e.to_string());
+                            it.task_id = Some(task_id);
+                            it.console_title = resp.title.clone();
+                            it.state = ItemState::Transferring;
                             it.updated_at = unix_ms();
                         }
+                        self.poll_failures = 0;
+                        self.copy_phase_stalls = 0;
+                        self.last_sample = None;
+                        self.spawn_poller(item, task_id);
                         self.persist_queue();
-                        self.log(LogLevel::Error, format!("Item #{item} failed: {e}"));
-                        self.maybe_start_next().await;
+                        self.log(
+                            LogLevel::Info,
+                            format!("Console accepted item #{item} (task {task_id}) — downloading"),
+                        );
+                        // A pause may have arrived while the request was in
+                        // flight (there was no task id to pause yet): apply it now.
+                        if !self.running {
+                            self.pause_remote(task_id).await;
+                            if let Some(it) = self.queue.get_mut(item) {
+                                it.state = ItemState::Paused;
+                                it.updated_at = unix_ms();
+                            }
+                            self.persist_queue();
+                            self.log(
+                            LogLevel::Info,
+                            "Console accepted the request; paused right away (pause arrived during submit)",
+                        );
+                        }
+                    }
+                    Err(e) => {
+                        // A backend that answered "success" without a task id did
+                        // accept the install — the outcome is simply untrackable.
+                        // Reporting that as Failed would be dishonest; mark it
+                        // Unknown and let the user verify on the console.
+                        if matches!(e, RpiError::MissingTaskId) {
+                            if let Some(it) = self.queue.get_mut(item) {
+                                it.state = ItemState::Unknown;
+                                it.error = Some(
+                                "The console accepted the install but did not return a task id (fork dialect) — verify on the console, then mark completed or retry".into(),
+                            );
+                                it.updated_at = unix_ms();
+                            }
+                            self.persist_queue();
+                            self.log(
+                            LogLevel::Warn,
+                            format!("Item #{item}: install accepted without a task id — outcome unknown"),
+                        );
+                            self.maybe_start_next().await;
+                            return;
+                        }
+                        let attempts = self.queue.get(item).map(|i| i.attempts).unwrap_or(0);
+                        let transient = e.is_transient();
+                        if transient && attempts + 1 < MAX_SUBMIT_ATTEMPTS {
+                            if let Some(it) = self.queue.get_mut(item) {
+                                it.attempts = attempts + 1;
+                                it.error = Some(e.to_string());
+                            }
+                            let urls = self.rebuild_urls(item).unwrap_or_default();
+                            let backoff = Duration::from_secs(1u64 << attempts);
+                            self.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "Submit failed ({e}); retrying in {backoff:?} (attempt {}/{})",
+                                    attempts + 2,
+                                    MAX_SUBMIT_ATTEMPTS
+                                ),
+                            );
+                            let tx = self.internal_tx.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(backoff).await;
+                                let _ = tx.send(Internal::SubmitRetry { item, urls });
+                            });
+                        } else {
+                            if let Some(it) = self.queue.get_mut(item) {
+                                it.state = ItemState::Failed;
+                                it.error = Some(e.to_string());
+                                it.updated_at = unix_ms();
+                            }
+                            self.persist_queue();
+                            self.log(LogLevel::Error, format!("Item #{item} failed: {e}"));
+                            self.maybe_start_next().await;
+                        }
                     }
                 }
-            },
+            }
             Internal::SubmitRetry { item, urls } => {
                 // Only retry if the item is still submitting and console alive.
                 let still = matches!(
@@ -755,6 +894,10 @@ impl EngineInner {
                 continue; // try the next queued item
             }
             let Some(urls) = self.rebuild_urls(id) else {
+                self.log(
+                    LogLevel::Error,
+                    "Could not register package files with the local server — install cannot proceed",
+                );
                 return;
             };
             if let Some(item) = self.queue.get_mut(id) {
@@ -867,7 +1010,11 @@ impl EngineInner {
                             "Transfer finished but the console does not report the copy phase yet — keep the console awake and check its notifications",
                         );
                     }
-                } else {
+                } else if it.state != ItemState::Paused {
+                    // Keep the user's Paused state: the console still reports
+                    // progress for a paused task, but that must not un-pause
+                    // the item in the UI. Terminal transitions above
+                    // (completion / console error) still apply.
                     it.state = ItemState::Transferring;
                     self.copy_phase_stalls = 0;
                 }
@@ -922,6 +1069,41 @@ impl EngineInner {
 
     // -- remote control --------------------------------------------------------
 
+    /// Resume one paused item: ask the console to continue its task and
+    /// re-attach a poller when this item is not the monitored one. Honors the
+    /// single-active-task invariant.
+    async fn resume_item(&mut self, id: ItemId) {
+        let Some(task_id) = self.queue.get(id).and_then(|i| i.task_id) else {
+            self.log(
+                LogLevel::Warn,
+                format!("Item #{id} has no console task to resume — use Retry instead"),
+            );
+            return;
+        };
+        let is_monitored = self.active.as_ref().map(|a| a.item_id) == Some(id);
+        if !is_monitored && self.active.is_some() {
+            self.log(
+                LogLevel::Warn,
+                "Another item is already being monitored — wait for it to finish first",
+            );
+            return;
+        }
+        self.running = true;
+        self.resume_remote(task_id).await;
+        if let Some(item) = self.queue.get_mut(id) {
+            item.state = ItemState::Transferring;
+            item.updated_at = unix_ms();
+        }
+        if !is_monitored {
+            self.spawn_poller(id, task_id);
+        }
+        self.persist_queue();
+        self.log(
+            LogLevel::Info,
+            format!("Resumed item #{id} (task {task_id})"),
+        );
+    }
+
     async fn pause_remote(&mut self, task_id: i64) {
         if let Some(client) = self.client.clone() {
             let _ = client.pause_task(task_id).await;
@@ -960,18 +1142,38 @@ impl EngineInner {
     }
 
     /// Start (or restart) the file server on an interface that can reach the
-    /// console; never `0.0.0.0` silently.
+    /// console; never `0.0.0.0` silently. A fixed port may still be held for a
+    /// few milliseconds by the previous server's shutdown, so binding is
+    /// retried briefly before giving up.
     async fn start_server_for(&mut self, console_addr: SocketAddr) {
         // Stop any previous server: parts are re-registered on demand.
         if let Some(old) = self.server.take() {
             old.shutdown();
         }
         let bind_ip = pick_bind_ip(console_addr.ip());
-        let port = self.settings().server_port.unwrap_or(0);
+        let fixed_port = self.settings().server_port;
+        let port = fixed_port.unwrap_or(0);
         let bind = SocketAddr::new(bind_ip, port);
-        match FileServer::start(bind).await {
-            Ok(server) => {
-                let s = Arc::new(server);
+        let attempts = if fixed_port.is_some() { 8 } else { 1 };
+        let mut last_err = None;
+        let mut server = None;
+        for attempt in 0..attempts {
+            match FileServer::start(bind).await {
+                Ok(s) => {
+                    server = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt + 1 < attempts {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        }
+        match server {
+            Some(s) => {
+                let s = Arc::new(s);
                 self.log(
                     LogLevel::Info,
                     format!(
@@ -987,17 +1189,19 @@ impl EngineInner {
                 }
                 self.server = Some(s);
             }
-            Err(e) => {
+            None => {
                 self.log(
                     LogLevel::Error,
-                    format!("Could not start the local file server on {bind}: {e} — installs cannot proceed"),
+                    format!("Could not start the local file server on {bind}: {} — installs cannot proceed", last_err.map(|e| e.to_string()).unwrap_or_default()),
                 );
             }
         }
     }
 
-    /// Reconcile `Unknown`/active items against the console after connecting:
-    /// re-attach pollers to tasks that still exist; never resubmit blindly.
+    /// Reconcile `Unknown`/`Paused` items against the console after connecting:
+    /// re-attach a poller to ONE task that still exists (the engine monitors a
+    /// single active task); the rest keep their state with a hint so the user
+    /// resumes them deliberately. Never resubmits blindly.
     async fn reconcile(&mut self) {
         let items: Vec<(ItemId, Option<i64>, Option<String>, i32)> = self
             .queue
@@ -1014,6 +1218,7 @@ impl EngineInner {
                 )
             })
             .collect();
+        let mut attached = false;
         for (id, task_id, content_id, sub_type) in items {
             let Some(client) = self.client.clone() else {
                 return;
@@ -1025,22 +1230,39 @@ impl EngineInner {
                 let tid = found.task_id;
                 if let Some(it) = self.queue.get_mut(id) {
                     it.task_id = Some(tid);
-                    it.state = ItemState::Transferring;
                     it.error = None;
                 }
+                if attached {
+                    self.log(
+                        LogLevel::Info,
+                        format!("Console still reports item #{id} (task {tid}); it will be resumed after the monitored item finishes"),
+                    );
+                    continue;
+                }
+                if let Some(it) = self.queue.get_mut(id) {
+                    it.state = ItemState::Transferring;
+                }
                 self.spawn_poller(id, tid);
+                attached = true;
                 self.log(
                     LogLevel::Info,
                     format!("Re-attached item #{id} to console task {tid}"),
                 );
                 continue;
             }
-            if let (Some(tid), None) = (task_id, content_id.as_ref()) {
-                // No content id but a task id: probe progress once.
+            if let Some(tid) = task_id {
+                // Probe progress once by task id — works even when the backend
+                // does not implement find_task.
                 if let Ok(pv) = client.task_progress(tid).await
                     && pv.raw_error == 0
                 {
                     if let Some(it) = self.queue.get_mut(id) {
+                        if attached {
+                            it.error = Some(
+                                "Console still reports this task; it will be resumed after the monitored item finishes".into(),
+                            );
+                            continue;
+                        }
                         it.state = if pv.local_copy_percent >= 100 {
                             ItemState::Completed
                         } else if pv.transferred >= pv.total && pv.total > 0 {
@@ -1050,7 +1272,10 @@ impl EngineInner {
                         };
                         it.progress = Some(pv);
                     }
-                    self.spawn_poller(id, tid);
+                    if !attached {
+                        self.spawn_poller(id, tid);
+                        attached = true;
+                    }
                     continue;
                 }
             }
