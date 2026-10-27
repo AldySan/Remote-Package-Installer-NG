@@ -1,0 +1,45 @@
+name: Release
+
+# Manual or tag-triggered builds. Binaries are attached to the workflow run;
+# attaching to a GitHub release is done via the UI/gh CLI by the maintainer.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: rpi-ng-linux-x64
+            binary: remote-package-installer-ng
+          - os: windows-latest
+            artifact: rpi-ng-windows-x64
+            binary: remote-package-installer-ng.exe
+          - os: macos-latest
+            artifact: rpi-ng-macos
+            binary: remote-package-installer-ng
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release --locked
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ matrix.binary }}" "dist/"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
