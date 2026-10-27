@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/rpi-ng-core", "crates/rpi-ng"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/AldySan/Remote-Package-Installer-NG"
+rust-version = "1.95"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
