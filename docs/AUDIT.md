@@ -1,0 +1,154 @@
+# Audit Report — full logic / bug / performance review
+
+Date: 2026-10-27 · Scope: every module of `rpi-ng-core` and `rpi-ng` (UI),
+including the mock-backend test suite. Method: line-by-line read of all
+sources, cross-checked against `docs/BASELINE.md` protocol facts; every fix
+below carries a regression test or is exercised by one.
+
+Findings are graded P0 (silent data/queue loss or stall), P1 (wrong user-visible
+state), P2 (incorrect behavior in edge paths), P3 (robustness/diagnostics),
+and PERF (throughput/latency/allocation).
+
+## 1. Fixed findings
+
+### P0 — part-id desync between the queue and the file server (engine)
+
+`rebuild_urls` called `server.register(...)` but **discarded the returned
+registration id**, then built URLs with the id stored in the queue. Those two
+counters are independent: `Queue::next_part` advances when files are *added*,
+the server's registry advances when parts are *submitted*. They only stay
+aligned while every queued part is submitted, in order, to the same server
+instance.
+
+Broken scenarios (queue stalls **silently** — `url_for` returns `None`,
+`maybe_start_next` returns without a log):
+
+- restart with pending (never-submitted) items in `queue.json`, then reconnect —
+  the fresh server restarts its counter at 0;
+- add → remove-without-submitting → add → submit (the removed item's ids leave
+  a gap);
+- any retry-after-reconnect sequence.
+
+Fix: `rebuild_urls` now uses the id the server hands back and writes it into
+the queue part (`part.id` is server-scoped, refreshed at every registration).
+Regression: `engine_submits_restored_queue_with_unaligned_part_ids`.
+
+### P1 — poller overwrote the user's Paused state (engine)
+
+`handle_progress` assigned `Transferring`/`Installing` on every successful
+poll, so a paused item flipped back to "Transferring" within one poll interval
+(~1 s). The console legitimately keeps reporting progress for a paused task.
+Fix: intermediate transitions now skip when the item is `Paused`; terminal
+transitions (completion, console-side error) still apply. The pause log line
+also no longer overclaims ("best-effort"). Regression:
+`engine_pause_survives_progress_polls`.
+
+### P1 — pause during submit was ignored (engine)
+
+`Pause` had no task id to act on while a request was in flight, and when the
+console accepted the request the item transferred anyway. Fix: a pause
+recorded while submitting is applied immediately after the console accepts
+(`SubmitResult` handler checks `running`).
+
+### P1 — disconnect orphaned in-flight items (engine)
+
+`Disconnect` cleared the connection and poller but left items in
+`Transferring`/`Installing` forever; `reconcile` only looked at
+`Unknown`/`Paused`, so those items were invisible to recovery and to
+`maybe_start_next`. Fix: disconnect marks in-flight items `Unknown` (never
+auto-resubmitted) with an explanatory hint; late submit results record the
+task id for reconcile instead of overwriting the state. Regression:
+`engine_disconnect_marks_inflight_unknown_and_reattaches` (also proves
+find_task-based re-attach after reconnect).
+
+### P1 — late submit results overwrote user decisions (engine)
+
+A submit response arriving after the user cancelled (or after a disconnect)
+unconditionally flipped the item to `Transferring` and spawned a poller. Fix:
+`SubmitResult` only proceeds when the item is still `Submitting`; cancelled
+items get a best-effort remote stop/unregister of the ghost task.
+
+### P1 — installs accepted without a task id were reported Failed (engine/client)
+
+Some v3.x forks answer `{"status":"success"}` without a `task_id`. The client
+classified this `MissingTaskId` (not transient) and the engine marked the item
+**Failed** — implying the install never happened, when it had in fact been
+accepted and was simply untrackable. Fix: the item becomes `Unknown` with a
+"verify on the console" hint (evidence-based honesty). Regression:
+`engine_install_without_task_id_is_unknown_not_failed`.
+
+### P2 — reconcile spawned pollers it could not track (engine)
+
+`self.active` is a single slot, but `reconcile` called `spawn_poller` per
+matched item: every poller except the last had its progress dropped forever.
+Fix: reconcile attaches exactly one poller (single-active invariant), keeps
+`find_task` evidence for the rest and hints that they will be resumed after
+the monitored item finishes. The task-id progress probe now also runs when a
+content id exists but `find_task` is unsupported.
+
+### P2 — per-row Resume could not resume anything (engine/UI)
+
+The row button sent the id-less `Command::Resume`, which only acted on the
+*active* task — after a reconnect there is none, so paused items had a dead
+button. Fix: new `Command::ResumeItem(id)` resumes one paused item through its
+console task id (guards the single-active invariant); global `Resume` falls
+back to the first paused item when nothing is active.
+
+### P2 — cancelling a non-active item skipped remote cleanup (engine)
+
+Stopping a paused/unknown item left its console-side task running. Fix:
+cancel now issues best-effort `stop_task`/`unregister_task` when a task id and
+connection exist, and logs the same caveat as the active path.
+
+### P2 — settings were persisted to the wrong directory (engine)
+
+`SetSettings` saved through `Settings::save()` (global user dir), not the
+engine's `data_dir` — test/headless runs wrote to the real user settings. Fix:
+`save_in(self.data_dir)`.
+
+### P3 — silent failure paths (engine)
+
+- Hitting the 2000-file scan cap was invisible; now logged as a warning.
+- `rebuild_urls` failure returned silently from `maybe_start_next`; now logged
+  as an error.
+
+### P3 — fixed-port rebind race (engine/file server)
+
+Restarting the file server on a user-configured fixed port can race the old
+server's listener teardown. Fix: the bind is retried for ~2 s (8 × 250 ms)
+before failing.
+
+## 2. Performance findings (applied)
+
+| Area | Before | After | Why |
+| --- | --- | --- | --- |
+| File server streaming | 64 KiB chunks | 256 KiB chunks | ~4× fewer read syscalls and executor wakeups per GB on gigabit LAN; memory stays bounded per connection |
+| Discovery verification | sequential per hit | bounded concurrency 8 (`buffered`, order-preserving) | one unresponsive endpoint no longer stalls the whole pass |
+| Discovery TCP sweep | 64 concurrent connects | 128 | halves worst-case sweep time on /24s with silent-drop firewalls |
+| Connect probe | `is_exists` twice on the fallback path | exactly once | removes a wasted round-trip per probe |
+| Queue view rendering | full `Vec<QueueItem>` clone per frame + needle lowercased per item | filtered index list + needle lowered once | eliminates O(items) allocations per repaint with large queues |
+
+## 3. Reviewed and intentionally left unchanged
+
+- `json_fix::repair` (string-aware hex rewrite) — correct on escapes; covered
+  by unit tests.
+- PKG/SFO parsers — bounds-checked with caps; no reachable panic found.
+- File-server allowlist model (opaque ids, decorative name segment) — no
+  traversal path exists; multi-range fallback is RFC 7233-compliant.
+- `pick_bind_ip` — derives candidates from real interface submasks only (no
+  routing-table /0 hazard).
+- Engine snapshot-on-every-event — O(items) clone per event is acceptable at
+  the default 1 s poll cadence; revisit only if queues exceed ~10k items.
+- `rpi_mock` fidelity — the mock's prerequisite Range fetch and hex dialect
+  remain the protocol-conformance harness; all new engine regressions run
+  against it.
+
+## 4. Verification
+
+- 44 tests green (`cargo test --workspace`) across core, queue, file server,
+  PKG and mock-backend suites, including the five new regression tests added
+  by this audit.
+- `cargo fmt --check` and `cargo clippy --workspace --all-targets -D warnings`
+  clean (CI gates on the same).
+- No real-console hardware was available; console-side behavior claims remain
+  backed by `docs/BASELINE.md` evidence and the mock only — unchanged policy.

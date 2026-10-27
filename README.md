@@ -142,6 +142,7 @@ documented quirks) and `docs/RESEARCH.md` (ecosystem findings).
 | [`docs/RESEARCH.md`](docs/RESEARCH.md) | Ecosystem research (pkg-sender, DirectPackageInstaller, GoldHEN, etaHEN, …) with confidence levels and licensing |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Stack selection, engine/queue/server/discovery design, PS5 extension points |
 | [`docs/TESTING.md`](docs/TESTING.md) | Test strategy, mock-backend philosophy, what is and is not covered |
+| [`docs/AUDIT.md`](docs/AUDIT.md) | Full logic/bug/performance audit: findings, fixes and their regression tests |
 | [`docs/PS5_ROADMAP.md`](docs/PS5_ROADMAP.md) | PS5 feasibility (DPI v1/v2, BGFT removal), go/no-go and plan |
 | [`MIGRATION.md`](MIGRATION.md) | Coming from other senders / from the original workflow |
 
