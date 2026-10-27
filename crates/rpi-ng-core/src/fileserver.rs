@@ -252,8 +252,10 @@ async fn serve_inner(
     if offset > 0 && file.seek(SeekFrom::Start(offset)).await.is_err() {
         return not_found();
     }
-    // Stream exactly `length` bytes in bounded chunks.
-    let stream = ReaderStream::with_capacity(file.take(length), 64 * 1024);
+    // Stream exactly `length` bytes in bounded chunks. 256 KiB keeps
+    // per-chunk syscall/wakeup overhead low on gigabit LANs while bounding
+    // memory per connection (the console opens only a handful).
+    let stream = ReaderStream::with_capacity(file.take(length), 256 * 1024);
     let body = Body::from_stream(stream);
 
     let mut builder = Response::builder()

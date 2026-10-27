@@ -15,15 +15,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toolbar(app, ui);
     ui.add_space(4.0);
 
-    let items: Vec<QueueItem> = app
+    // Filter to row indices once per frame: no QueueItem clones, and the
+    // search needle is lowered exactly once (not once per item).
+    let needle = app.search.trim().to_lowercase();
+    let indices: Vec<usize> = app
         .snapshot
         .items
         .iter()
-        .filter(|i| matches_search(&app.search, i))
-        .cloned()
+        .enumerate()
+        .filter(|(_, item)| matches_search(&needle, item))
+        .map(|(idx, _)| idx)
         .collect();
 
-    if items.is_empty() {
+    if indices.is_empty() {
         empty_state(app, ui);
         return;
     }
@@ -32,19 +36,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // stay responsive.
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, items.len(), |ui, range| {
+        .show_rows(ui, ROW_HEIGHT, indices.len(), |ui, range| {
             for idx in range {
-                item_row(app, ui, &items[idx]);
+                let item = &app.snapshot.items[indices[idx]];
+                item_row(app, ui, item);
                 ui.separator();
             }
         });
 }
 
-fn matches_search(search: &str, item: &QueueItem) -> bool {
-    if search.is_empty() {
+fn matches_search(needle: &str, item: &QueueItem) -> bool {
+    if needle.is_empty() {
         return true;
     }
-    let needle = search.to_lowercase();
     let primary = item.primary_part();
     let title = primary.map(|p| p.display_title()).unwrap_or_default();
     let file = primary.map(|p| p.file_name.clone()).unwrap_or_default();
@@ -52,7 +56,7 @@ fn matches_search(search: &str, item: &QueueItem) -> bool {
     let cid = item.content_id().unwrap_or_default().to_string();
     [title, file, title_id, cid]
         .iter()
-        .any(|hay| hay.to_lowercase().contains(&needle))
+        .any(|hay| hay.to_lowercase().contains(needle))
 }
 
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
@@ -157,7 +161,7 @@ fn empty_state(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn item_row(app: &mut App, ui: &mut egui::Ui, item: &QueueItem) {
+fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
     let id = item.id;
     let state = item.state;
     let color = state_color(&state);

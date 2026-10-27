@@ -23,7 +23,10 @@ use crate::{
 /// 12800 first, 9090 as the GoldHEN-family fallback).
 pub const PROBE_PORTS: [u16; 2] = [12800, 9090];
 
-const CONCURRENCY: usize = 64;
+const CONCURRENCY: usize = 128;
+
+/// Bounded concurrency for RPI verification of discovery hits.
+const VERIFY_CONCURRENCY: usize = 8;
 
 fn to_u32(ip: &Ipv4Addr) -> u32 {
     u32::from_be_bytes(ip.octets())
@@ -113,15 +116,21 @@ pub async fn discover(settings: &Settings) -> Vec<ConsoleCandidate> {
     let mut candidates: Vec<ConsoleCandidate> = Vec::new();
     let mut seen_ips: HashSet<IpAddr> = HashSet::new();
 
-    // 1. Remembered hosts (usually the answer).
+    // 1. Remembered hosts (usually the answer) — verified concurrently so a
+    // single unreachable host does not stall the whole pass.
     let remembered: Vec<SocketAddr> = settings.remembered.iter().map(|rc| rc.addr).collect();
-    for addr in remembered {
-        if seen_ips.insert(addr.ip())
-            && let Some(c) = verify_addr(addr, DiscoverySource::Remembered).await
-        {
-            candidates.push(c);
-        }
-    }
+    let uniq: Vec<SocketAddr> = remembered
+        .into_iter()
+        .filter(|a| seen_ips.insert(a.ip()))
+        .collect();
+    let hits: Vec<Option<ConsoleCandidate>> = stream::iter(
+        uniq.into_iter()
+            .map(|addr| async move { verify_addr(addr, DiscoverySource::Remembered).await }),
+    )
+    .buffered(VERIFY_CONCURRENCY)
+    .collect()
+    .await;
+    candidates.extend(hits.into_iter().flatten());
 
     // 2. Bounded subnet sweep.
     if settings.discovery_enabled {
@@ -159,12 +168,17 @@ pub async fn discover(settings: &Settings) -> Vec<ConsoleCandidate> {
             }
         }
 
-        // 3. Verify each hit speaks the RPI dialect.
-        for addr in ordered {
-            if let Some(c) = verify_addr(addr, DiscoverySource::SubnetProbe).await {
-                candidates.push(c);
-            }
-        }
+        // 3. Verify each hit speaks the RPI dialect — concurrently (bounded),
+        // in discovery order.
+        let verified: Vec<Option<ConsoleCandidate>> = stream::iter(
+            ordered
+                .into_iter()
+                .map(|addr| async move { verify_addr(addr, DiscoverySource::SubnetProbe).await }),
+        )
+        .buffered(VERIFY_CONCURRENCY)
+        .collect()
+        .await;
+        candidates.extend(verified.into_iter().flatten());
     }
 
     candidates

@@ -127,17 +127,6 @@ impl RpiClient {
             }
             Err(_) => false,
         };
-        if !speaks_rpi {
-            // Give the is_exists round-trip one chance to prove RPI anyway
-            // (defensive against slight dialect differences).
-            let exists = self.is_exists("PROBE00000").await;
-            let ok = exists.is_ok();
-            if !ok {
-                return Err(RpiError::Network(
-                    "endpoint did not answer the RPI probes".into(),
-                ));
-            }
-        }
 
         // (2) /api/status — newer receivers answer {"busy":...}; old ones HTML.
         let mut caps = BackendCaps::default();
@@ -154,17 +143,25 @@ impl RpiClient {
         }
 
         // (3) Full request/response path validation (read-only API call).
+        // This is also the fallback dialect proof when the /api fingerprint
+        // is missing, so it is issued exactly once.
         match self.is_exists("PROBE00000").await {
             Ok(_) => {
                 caps.install_direct = true;
             }
-            Err(e @ RpiError::BackendError { .. }) => {
+            Err(RpiError::BackendError { .. }) if speaks_rpi => {
                 // The endpoint understood the dialect but rejected the probe —
                 // still an RPI server.
-                let _ = e;
                 caps.install_direct = true;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if speaks_rpi {
+                    return Err(e);
+                }
+                return Err(RpiError::Network(
+                    "endpoint did not answer the RPI probes".into(),
+                ));
+            }
         }
 
         Ok(ProbeOutcome {
