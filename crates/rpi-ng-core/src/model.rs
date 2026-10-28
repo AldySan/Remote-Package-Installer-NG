@@ -7,6 +7,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::settings::Settings;
+
 /// Task id as assigned by the console backend (BGFT task id in the RPI dialect).
 pub type TaskId = i64;
 
@@ -471,4 +473,8 @@ pub enum Event {
     Log(LogLevel, String),
     /// Discovery finished (may be empty).
     DiscoveryDone(Vec<ConsoleCandidate>),
+    /// Settings changed on the engine side — an echo of `SetSettings` or an
+    /// engine-side update (e.g. the remembered-console list). The UI should
+    /// refresh its cached copy.
+    SettingsChanged(Settings),
 }

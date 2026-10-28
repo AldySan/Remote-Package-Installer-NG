@@ -1,4 +1,7 @@
 //! Remote Package Installer NG — desktop application entry point.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Release builds on Windows open no console window (the GUI is the app).
+// Debug builds keep the console so `cargo run` output stays visible.
 
 mod app;
 mod connect_view;

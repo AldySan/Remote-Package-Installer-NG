@@ -1,4 +1,8 @@
 //! Settings window (persisted via the engine).
+//!
+//! The editable draft lives on [`App`] so it survives across frames: a
+//! per-frame local clone would reset on every repaint and silently drop
+//! every edit before the user could press Save (the v0.0.1 settings bug).
 
 use eframe::egui;
 
@@ -7,9 +11,11 @@ use rpi_ng_core::settings::ThemeMode;
 use crate::app::App;
 
 pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
-    // Local edits are applied to a scratch copy; Save pushes them through the
-    // engine (which persists them).
-    let mut draft = app.settings.clone();
+    let Some(draft) = app.settings_draft.as_mut() else {
+        // No draft means the window is not supposed to be open.
+        *open = false;
+        return;
+    };
     let mut save = false;
     egui::Window::new("Settings")
         .open(open)
@@ -92,7 +98,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                 );
             });
         });
-    if save {
+    if save && let Some(draft) = app.settings_draft.clone() {
         app.settings = draft.clone();
         app.send(rpi_ng_core::Command::SetSettings(Box::new(draft)));
     }

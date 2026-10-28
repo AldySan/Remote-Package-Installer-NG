@@ -26,7 +26,7 @@ use rpi_ng_core::{
     engine::Command,
     model::{Event, ItemState, Snapshot},
     rpi::{RpiClient, RpiError},
-    settings::Settings,
+    settings::{Settings, ThemeMode},
 };
 
 // ---------------------------------------------------------------------------
@@ -990,6 +990,27 @@ async fn wait_for_snapshot(
     }
 }
 
+/// Drain engine events until one matches (non-matching events, including
+/// snapshots, are discarded).
+async fn wait_for_event(
+    handle: &rpi_ng_core::engine::EngineHandle,
+    mut cond: impl FnMut(&Event) -> bool,
+    timeout: Duration,
+) -> Event {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        for ev in handle.poll_events() {
+            if cond(&ev) {
+                return ev;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timeout waiting for event");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[tokio::test]
 async fn engine_end_to_end_flow_completes_with_evidence() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -1793,5 +1814,57 @@ async fn engine_v2_disconnect_reconnect_reconciles_via_jobs() {
     assert_eq!(item.progress.unwrap().percent, 100.0);
     // One v2 install, no resubmission after reconnect.
     assert_eq!(mock.v2_installs().len(), 1);
+    handle.shutdown();
+}
+
+/// Regression test for the v0.0.1 settings bug: the engine must broadcast
+/// every settings change (remembered consoles on connect, `SetSettings`
+/// echo) so the UI's cached copy never goes stale.
+#[tokio::test]
+async fn engine_broadcasts_settings_changes() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    // 1. Connecting remembers the console and must broadcast the update.
+    handle.send(Command::Connect(mock.addr));
+    match wait_for_event(
+        &handle,
+        |ev| {
+            matches!(
+                ev,
+                Event::SettingsChanged(s) if s.remembered.iter().any(|r| r.addr == mock.addr)
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Event::SettingsChanged(s) => assert_eq!(s.remembered[0].addr, mock.addr),
+        _ => unreachable!("wait_for_event only returns matching events"),
+    }
+
+    // 2. SetSettings must echo the applied values back to the frontend.
+    let changed = Settings {
+        theme: ThemeMode::Dark,
+        ..Settings::default()
+    };
+    handle.send(Command::SetSettings(Box::new(changed.clone())));
+    match wait_for_event(
+        &handle,
+        |ev| matches!(ev, Event::SettingsChanged(s) if *s == changed),
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Event::SettingsChanged(s) => assert_eq!(s, changed),
+        _ => unreachable!("wait_for_event only returns matching events"),
+    }
+
     handle.shutdown();
 }

@@ -224,3 +224,50 @@ against its `docs/API.md`.
   clean.
 - Real-console validation remains unavailable — the NextGen wire behavior is
   reproduced from its published source, not from hardware.
+
+## 6. Addendum — findings from v0.0.1 user testing
+
+Two bugs reported after the first real-world use of the release binaries,
+plus one latent bug found while fixing them.
+
+### 6.1 Settings window edits were dropped (P0, UI)
+
+`settings_view::show` cloned the settings into a local `draft` **every
+frame** and only applied it when Save was clicked in that same frame. Any
+edit made in one frame was thrown away when the next frame re-cloned from
+the unchanged settings — combo boxes snapped back, checkboxes re-appeared
+unchecked, drag values reset. The window looked frozen.
+
+**Fix:** the draft now lives on `App` (`settings_draft: Option<Settings>`),
+seeded when the window opens and discarded when it closes (✕ or toggle);
+edits persist across frames until Save or discard. The theme renders from
+the draft while the window is open, giving a live preview before Save.
+
+### 6.2 Engine-side settings never flowed back to the UI (P1, latent)
+
+The engine owns the authoritative settings (it updates the
+remembered-console list on every connect) but the UI kept its startup copy
+forever: the "remembered" list in the connect view was stale for the whole
+session, and a later Save would have clobbered the engine's list with the
+stale one.
+
+**Fix:** new `Event::SettingsChanged(Settings)` emitted on every
+engine-side change (`SetSettings` echo, `remember_console`); the app
+refreshes its cache from it. Regression test:
+`engine_broadcasts_settings_changes`.
+
+### 6.3 Console window opened on Windows (P2, UX)
+
+The Windows release binary was built with the console subsystem, so a CMD
+window opened next to the GUI.
+
+**Fix:** `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`
+on the binary crate — release builds show only the GUI; debug builds keep
+the console for `cargo run` output.
+
+### Verification
+
+- UI-layer wiring (draft persistence, live theme preview) is verified by
+  reasoning + manual testing; the engine-side semantics are covered by the
+  new regression test. No UI automation framework was added — egui_kittest
+  would be a new dependency for two lines of logic, which is not worth it.
