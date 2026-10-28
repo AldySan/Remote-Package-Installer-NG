@@ -1,86 +1,50 @@
 # Remote Package Installer NG
 
-A desktop app for installing PKG files on a PS4 over your local network.
-No USB stick, no FTP — you pick the files on your computer, the app serves
-them over HTTP and tells the console to install them.
+**Put PS4 games on your console over your home network — no USB stick, no FTP.**
 
-It's a from-scratch rebuild of the client side of
-[flatz's ps4_remote_pkg_installer](https://github.com/flatz/ps4_remote_pkg_installer):
-same idea, same protocol, but as a regular desktop app with a queue, real
-progress and proper recovery when things go wrong.
+A free, open-source desktop app for **Windows**, **macOS** and **Linux**. You pick the game files (`.pkg`) on your computer, and the app sends them straight to your PS4 — with real progress, pause and resume.
 
-Early days — everything listed below is implemented and tested, but treat it
-as work in progress.
-
-## What it does
-
-- Finds consoles on your LAN automatically, or connect by IP
-- Queue as many PKGs as you like — files or whole folders; multipart
-  packages get grouped, duplicates get caught
-- Progress, speed and ETA come from what the console actually reports;
-  an item only counts as done when the console says it's done
-- Pause, resume and cancel per item
-- If the app dies mid-install, it asks the console what actually happened
-  instead of blindly re-sending anything
-- Windows, Linux and macOS — single binary, no runtime deps
-- If the console app is RPI NextGen, this app notices its v2 API on connect
-  and uses it: installs report content id and title right away, progress and
-  speed come from the console's own job list (one request per poll), and
-  pause/resume/cancel go through the job endpoints. Everything still works
-  with the plain old protocol otherwise
-
-## What it doesn't do (yet)
-
-- No PS5 support. The code is laid out so a PS5 backend can be added later,
-  but it's not there.
-- Not validated on a real console yet. The protocol matches the original
-  implementation and there's a test suite with a mock console, but no actual
-  PS4 was available while writing this. Feedback from real hardware is welcome.
-- No prebuilt downloads — build it yourself for now.
+[Download](https://github.com/AldySan/Remote-Package-Installer-NG/releases) · [How to use](#how-to-use) · [Report a problem](https://github.com/AldySan/Remote-Package-Installer-NG/issues)
 
 ## What you need
 
-- A jailbroken PS4 running [GoldHEN](https://github.com/GoldHEN/GoldHEN)
-  (its built-in package installer speaks the same protocol), flatz's
-  Remote Package Installer payload, or
-  [RPI NextGen](https://github.com/AldySan/ps4_remote_pkg_installer_nextgen)
-  — keep it in the foreground, the PS4 suspends background apps
-- Your own PKG files — this app just delivers them, it doesn't ship any
-- [Rust](https://rustup.rs) 1.95 or newer to build
+- A PS4 with [GoldHEN](https://github.com/GoldHEN/GoldHEN) — you'll use the **Package Installer** inside it. ([RPI NextGen](https://github.com/AldySan/ps4_remote_pkg_installer_nextgen) works too.)
+- Your PS4 and your computer on the **same network** — same Wi-Fi or same router.
+- Your own `.pkg` game files, saved anywhere on your computer.
 
-## Building and running
+No accounts, no console-side setup, and nothing ever leaves your own network.
 
-```sh
-git clone https://github.com/AldySan/Remote-Package-Installer-NG.git
-cd Remote-Package-Installer-NG
-cargo run --release
-```
+## How to use
 
-First build takes a few minutes. If you build with `cargo build --release`
-instead, the binary lands in `target/release/remote-package-installer-ng`.
+1. **On the PS4**, open GoldHEN and start **Package Installer**. Keep it on screen the whole time — the PS4 pauses apps that go to the background.
+2. **On your computer**, download the app from the [Releases](https://github.com/AldySan/Remote-Package-Installer-NG/releases) page and unpack it:
+   - Windows → `RemotePackageInstallerNG-vX.Y.Z-Windows-x64.zip`
+   - Mac → `RemotePackageInstallerNG-vX.Y.Z-macos-universal.tar.gz` (works on every Mac)
+   - Linux → `RemotePackageInstallerNG-vX.Y.Z-Linux-x64.tar.gz`
+3. Run the app. It looks for your PS4 on its own. If nothing shows up, type the PS4's IP address instead — you'll find it on the console under *Settings → Network → View Connection Status*.
+4. Add your `.pkg` files (one or many, whole folders too) and press **Start**.
+5. When the app says an item is **Done**, the game appears on your PS4's home screen.
 
-`cargo test --workspace` runs the full test suite — it's self-contained
-(mock console, generated fixtures), no PS4 needed.
+You can line up as many files as you like, watch speed and remaining time while they install, and pause or cancel any of them. If the app or the console gets interrupted, it checks with the PS4 what actually finished instead of blindly sending everything again.
 
-Basic flow: start the installer app on the console, open this app, let it
-scan (or type the IP), connect, add your PKGs, press start.
+## Common problems
 
-## Troubleshooting
+- **A blue "Windows protected your PC" window appears** — normal for unsigned free apps. Click *More info*, then *Run anyway*.
+- **macOS says the app "cannot be verified"** — right-click the app, choose *Open*, then *Open* again. Needed only the first time.
+- **No PS4 shows up** — make sure the installer is open on the console (not sitting in the background) and both machines are on the same network. Typing the IP manually helps; with some GoldHEN versions you need to add the port, like `192.168.1.20:9090`.
+- **A firewall message appears on your computer** — allow it. The PS4 downloads the files from your computer, so the app needs to accept that connection.
+- **An install stops halfway** — the PS4 probably put the installer app in the background. Open it again on the console, then reconnect in the app — it will figure out where things actually stand and continue from there.
+- **Anything else** — [open an issue](https://github.com/AldySan/Remote-Package-Installer-NG/issues) and describe what you did and what happened. This is an early release; reports genuinely help.
 
-- **No console found** — make sure the installer app is in the foreground on
-  the PS4 and both machines are on the same network. Try the manual IP. Some
-  GoldHEN setups listen on port 9090, so `IP:9090` is worth a shot.
-- **"Console lost" mid-install** — the PS4 suspended the app. Reopen it on
-  the console, then reconnect here; the queue sorts itself out without
-  duplicating tasks.
-- **Firewall prompt on your PC** — allow it. The console downloads the files
-  from your machine.
+## Good to know
 
-## Docs
+- The app **does not come with games** and does not download anything. You bring your own `.pkg` files — it just delivers them to the console.
+- Installing happens through the console's own installer. The app doesn't modify or "hack" your PS4.
+- **PS4 only.** PS5 is not supported.
 
-Longer writeups live in `docs/`: the analysis of the original payload, the
-research behind this design, the architecture, a full code audit, and a PS5
-roadmap. Start there if you want to know how things work.
+## For developers
+
+Written in Rust (egui + tokio). Building from source, tests, architecture and protocol documentation: see [docs/BUILDING.md](docs/BUILDING.md) and the [docs folder](docs/).
 
 ## Contributors
 
@@ -90,8 +54,4 @@ roadmap. Start there if you want to know how things work.
 
 GPL-3.0 — see [LICENSE](LICENSE).
 
-The original [ps4_remote_pkg_installer](https://github.com/flatz/ps4_remote_pkg_installer)
-ships no license, so nothing was copied from it — the protocol here was
-re-implemented from reading its source. Discovery and probing patterns were
-informed by [pkg-sender](https://github.com/Loopayeh/pkg-sender) (MIT),
-also re-implemented from scratch.
+The original [ps4_remote_pkg_installer](https://github.com/flatz/ps4_remote_pkg_installer) ships no license, so nothing was copied from it — the protocol here was re-implemented from reading its source. Discovery and probing patterns were informed by [pkg-sender](https://github.com/Loopayeh/pkg-sender) (MIT), also re-implemented from scratch.
