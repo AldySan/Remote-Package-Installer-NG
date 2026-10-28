@@ -315,8 +315,8 @@ impl App {
             ),
             ServerCheck::NoAnswer => (
                 LogLevel::Warn,
-                "File server self-check: no answer within the timeout — a firewall or \
-                 antivirus may be intercepting the connection."
+                "File server self-check: no answer within the timeout — the server may have \
+                 stopped, or a firewall/antivirus is intercepting the connection."
                     .to_string(),
             ),
             ServerCheck::Error(e) => (

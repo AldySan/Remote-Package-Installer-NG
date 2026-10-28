@@ -540,10 +540,13 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        // Loopback refusals are immediate and reliable on all three OSes.
+        // Windows sometimes drops the SYN to a just-released loopback port
+        // instead of answering RST (same platform variance as commit 95ef0f4);
+        // both outcomes agree on what the user cares about: nothing usable
+        // answered there.
         match self_check(port, Duration::from_millis(750)) {
-            ServerCheck::NotRunning => {}
-            other => panic!("expected NotRunning, got {other:?}"),
+            ServerCheck::NotRunning | ServerCheck::NoAnswer => {}
+            other => panic!("expected NotRunning/NoAnswer, got {other:?}"),
         }
     }
 
