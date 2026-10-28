@@ -194,6 +194,14 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
                     if let Some(kind) = p.content_kind.package_type() {
                         ui.label(egui::RichText::new(kind).small().weak());
                     }
+                    // Version straight from the package's PARAM.SFO: the app
+                    // version for games/patches, the package version otherwise
+                    // (themes and some add-ons only carry the latter).
+                    if let Some(av) = &p.app_version {
+                        ui.label(egui::RichText::new(format!("App v{av}")).small().weak());
+                    } else if let Some(pv) = &p.package_version {
+                        ui.label(egui::RichText::new(format!("Pkg v{pv}")).small().weak());
+                    }
                 }
             });
             ui.horizontal(|ui| {

@@ -43,6 +43,11 @@ in the workspace `Cargo.toml`:
 - Windows builds statically link the C runtime (`.cargo/config.toml`), so no
   "VCRUNTIME140.dll missing" errors on machines without the Visual C++
   redistributable
+- The update checker's TLS stack (rustls + aws-lc-rs) builds from source with
+  just a C compiler. On Windows x64 it would normally want NASM for its
+  assembly routines; `.cargo/config.toml` sets `AWS_LC_SYS_PREBUILT_NASM=1`
+  so builds fall back to the prebuilt objects when NASM is not installed
+  (Linux and macOS builds are unaffected either way).
 
 CI builds the same release binary on every push to `dev`/`main`
 (`.github/workflows/ci.yml`). Tag pushes (`v*`) trigger

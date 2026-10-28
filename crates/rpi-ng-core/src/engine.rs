@@ -24,7 +24,7 @@ use crate::{
     pkg::{self, parse_pkg_file},
     queue::Queue,
     rpi::{RpiClient, RpiError, types::V2Job},
-    settings::{RememberedConsole, Settings},
+    settings::{FailurePolicy, RememberedConsole, Settings},
 };
 
 /// Commands from the frontend to the engine.
@@ -339,6 +339,9 @@ impl EngineInner {
             }
             Command::Retry(id) => {
                 if self.queue.requeue(id) {
+                    // Retry expresses "process this now" — it also un-parks a
+                    // queue that was paused by the failure policy.
+                    self.running = true;
                     self.persist_queue();
                     self.log(LogLevel::Info, format!("Requeued item #{id}"));
                     self.maybe_start_next().await;
@@ -769,7 +772,7 @@ impl EngineInner {
                             }
                             self.persist_queue();
                             self.log(LogLevel::Error, format!("Item #{item} failed: {e}"));
-                            self.maybe_start_next().await;
+                            self.on_transfer_failure().await;
                         }
                     }
                 }
@@ -1048,7 +1051,7 @@ impl EngineInner {
                         crate::rpi::explain_error_code(err).unwrap_or("unknown console error");
                     it.state = ItemState::Failed;
                     it.error = Some(format!("console error 0x{err:X}: {gloss}"));
-                    self.stop_poller_and_continue().await;
+                    self.on_transfer_failure().await;
                     return;
                 }
 
@@ -1200,7 +1203,7 @@ impl EngineInner {
                     LogLevel::Error,
                     format!("Item #{item} failed: console job error 0x{:X}", job.error),
                 );
-                self.stop_poller_and_continue().await;
+                self.on_transfer_failure().await;
             }
             st::STOPPED => {
                 it.state = ItemState::Cancelled;
@@ -1231,6 +1234,28 @@ impl EngineInner {
         self.persist_queue();
         if self.settings().auto_advance {
             self.maybe_start_next().await;
+        }
+    }
+
+    /// A transfer failed. Honor the failure policy: keep the queue moving, or
+    /// park it until the user explicitly restarts (Start queue / Retry).
+    async fn on_transfer_failure(&mut self) {
+        self.stop_poller();
+        self.persist_queue();
+        match self.settings().on_failure {
+            FailurePolicy::Continue => {
+                if self.settings().auto_advance {
+                    self.maybe_start_next().await;
+                }
+            }
+            FailurePolicy::Pause => {
+                self.running = false;
+                self.log(
+                    LogLevel::Warn,
+                    "Queue paused: a package failed to transfer (setting: pause on \
+                     failure). Retry the item or press Start queue to continue.",
+                );
+            }
         }
     }
 

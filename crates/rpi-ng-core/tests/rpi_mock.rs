@@ -26,7 +26,7 @@ use rpi_ng_core::{
     engine::Command,
     model::{Event, ItemState, Snapshot},
     rpi::{RpiClient, RpiError},
-    settings::{Settings, ThemeMode},
+    settings::{FailurePolicy, Settings, ThemeMode},
 };
 
 // ---------------------------------------------------------------------------
@@ -1193,6 +1193,414 @@ async fn engine_marks_failed_on_console_error() {
         "error was {:?}",
         item.error
     );
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Failure policy: continue vs pause the queue after a failed transfer
+// ---------------------------------------------------------------------------
+
+/// Two packages, the console rejects the first install: with the Pause policy
+/// the second must never be submitted, and a Retry must restart the queue.
+#[tokio::test]
+async fn engine_failure_policy_pauses_queue_until_retry() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let first = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0A001_00-POLICYPAUSEONE.pkg",
+        "UP0001-CUSA0A001_00-POLICYPAUSEONE",
+    );
+    let second = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0A002_00-POLICYPAUSETWO.pkg",
+        "UP0001-CUSA0A002_00-POLICYPAUSETWO",
+    );
+
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    mock.state.lock().unwrap().fail_installs = Some(0x8099_0007);
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        on_failure: FailurePolicy::Pause,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![first, second],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| s.items.len() == 2, Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+
+    // First item fails at submit; the queue must park instead of advancing.
+    // The pause is user-visible (a Warn log) and the following snapshot shows
+    // the parked queue. Collect both from one drain loop.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_pause_log = false;
+    let mut latest: Option<Snapshot> = None;
+    loop {
+        for ev in handle.poll_events() {
+            match ev {
+                Event::Log(level, ref msg) if msg.contains("Queue paused") => {
+                    assert_eq!(level, rpi_ng_core::model::LogLevel::Warn);
+                    saw_pause_log = true;
+                }
+                Event::Snapshot(s) => latest = Some(s),
+                _ => {}
+            }
+        }
+        let settled = saw_pause_log
+            && latest
+                .as_ref()
+                .is_some_and(|s| s.items.iter().any(|i| i.state == ItemState::Failed));
+        if settled {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timeout: log={saw_pause_log} snapshot={latest:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Give the engine ample time to wrongly start the second item.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    for ev in handle.poll_events() {
+        if let Event::Snapshot(s) = ev {
+            latest = Some(s);
+        }
+    }
+    let latest = latest.expect("a snapshot follows the failure handling");
+    let failed_id = latest
+        .items
+        .iter()
+        .find(|i| i.state == ItemState::Failed)
+        .expect("the first item is Failed")
+        .id;
+    assert_eq!(
+        latest
+            .items
+            .iter()
+            .filter(|i| i.state == ItemState::Queued)
+            .count(),
+        1,
+        "second item must still be queued after a failure under the Pause policy"
+    );
+    assert_eq!(
+        mock.installs().len(),
+        1,
+        "only the failed install may ever reach the console"
+    );
+
+    // Clear the failure, retry the failed item: the queue restarts and both
+    // packages complete.
+    mock.state.lock().unwrap().fail_installs = None;
+    handle.send(Command::Retry(failed_id));
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().all(|i| i.state == ItemState::Completed),
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(snap.items.len(), 2);
+    assert_eq!(mock.installs().len(), 3, "retry + second item = 3 installs");
+    handle.shutdown();
+}
+
+/// Control: with the Continue policy a failed transfer does not stop the
+/// queue (this is the pre-policy behavior, now locked in as a setting).
+#[tokio::test]
+async fn engine_failure_policy_continue_advances_queue() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let first = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0B001_00-POLICYCONTONE.pkg",
+        "UP0001-CUSA0B001_00-POLICYCONTONE",
+    );
+    let second = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0B002_00-POLICYCONTTWO.pkg",
+        "UP0001-CUSA0B002_00-POLICYCONTTWO",
+    );
+
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    // Tiny step so the first transfer takes many polls — time to poison it.
+    mock.state.lock().unwrap().step = 4096;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        on_failure: FailurePolicy::Continue,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![first, second],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| s.items.len() == 2, Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+
+    // Wait for the first task, then fail it on the console side.
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(20),
+    )
+    .await;
+    let task_id = snap
+        .items
+        .iter()
+        .find(|i| i.task_id.is_some())
+        .unwrap()
+        .task_id
+        .unwrap();
+    {
+        let mut st = mock.state.lock().unwrap();
+        if let Some(t) = st.tasks.get_mut(&task_id) {
+            t.error = 0x8099_0005;
+        }
+    }
+
+    // Continue policy: the first item fails, the second still completes.
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items.iter().any(|i| i.state == ItemState::Failed)
+                && s.items.iter().any(|i| i.state == ItemState::Completed)
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(snap.items.len(), 2);
+    assert_eq!(mock.tasks().len(), 2, "both items were submitted");
+    handle.shutdown();
+}
+
+/// A console-side error mid-transfer (legacy dialect) parks the queue under
+/// the Pause policy: the second package is never submitted.
+#[tokio::test]
+async fn engine_failure_policy_pauses_after_console_error_mid_transfer() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let first = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0C001_00-POLICYMIDONE.pkg",
+        "UP0001-CUSA0C001_00-POLICYMIDONE",
+    );
+    let second = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0C002_00-POLICYMIDTWO.pkg",
+        "UP0001-CUSA0C002_00-POLICYMIDTWO",
+    );
+
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    // Tiny step so the transfer takes many polls — time to poison it.
+    mock.state.lock().unwrap().step = 4096;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        on_failure: FailurePolicy::Pause,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![first, second],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| s.items.len() == 2, Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+
+    // Wait for the task to exist, then poison it like a real console error.
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(20),
+    )
+    .await;
+    let task_id = snap
+        .items
+        .iter()
+        .find(|i| i.task_id.is_some())
+        .unwrap()
+        .task_id
+        .unwrap();
+    {
+        let mut st = mock.state.lock().unwrap();
+        if let Some(t) = st.tasks.get_mut(&task_id) {
+            t.error = 0x8099_0005;
+        }
+    }
+
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Failed),
+        Duration::from_secs(20),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let mut latest = snap.clone();
+    for ev in handle.poll_events() {
+        if let Event::Snapshot(s) = ev {
+            latest = s;
+        }
+    }
+    assert_eq!(
+        latest
+            .items
+            .iter()
+            .filter(|i| i.state == ItemState::Queued)
+            .count(),
+        1,
+        "second item must remain queued after a mid-transfer failure (Pause)"
+    );
+    assert_eq!(mock.tasks().len(), 1, "only one task was ever created");
+    handle.shutdown();
+}
+
+/// v2 dialect: a job that fails on the console parks the queue (Pause).
+#[tokio::test]
+async fn engine_failure_policy_pauses_after_v2_job_failure() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let first = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0D001_00-POLICYV2ONE.pkg",
+        "UP0001-CUSA0D001_00-POLICYV2ONE",
+    );
+    let second = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0D002_00-POLICYV2TWO.pkg",
+        "UP0001-CUSA0D002_00-POLICYV2TWO",
+    );
+
+    let mock = MockConsole::start_v2().await;
+    // Tiny step so the first job takes many polls — time to fail it before
+    // it completes on its own.
+    mock.state.lock().unwrap().step = 4096;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        on_failure: FailurePolicy::Pause,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![first, second],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| s.items.len() == 2, Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+
+    // Wait for the job to exist, then fail it on the console side.
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(20),
+    )
+    .await;
+    let job_id = snap
+        .items
+        .iter()
+        .find(|i| i.job_id.is_some())
+        .unwrap()
+        .job_id
+        .unwrap();
+    {
+        let mut st = mock.state.lock().unwrap();
+        if let Some(job) = st.jobs.get_mut(&job_id) {
+            job.state = "failed".into();
+            job.transferred = 0;
+        }
+    }
+
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Failed),
+        Duration::from_secs(20),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let mut latest = snap.clone();
+    for ev in handle.poll_events() {
+        if let Event::Snapshot(s) = ev {
+            latest = s;
+        }
+    }
+    assert_eq!(
+        latest
+            .items
+            .iter()
+            .filter(|i| i.state == ItemState::Queued)
+            .count(),
+        1,
+        "second item must remain queued after a v2 job failure (Pause)"
+    );
+    assert_eq!(mock.installs().len(), 1, "only one install was ever sent");
     handle.shutdown();
 }
 

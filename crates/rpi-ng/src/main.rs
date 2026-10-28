@@ -10,6 +10,7 @@ mod fmt;
 mod log_view;
 mod queue_view;
 mod settings_view;
+mod updater;
 
 use eframe::egui;
 

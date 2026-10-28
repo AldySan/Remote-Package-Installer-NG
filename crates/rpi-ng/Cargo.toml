@@ -15,4 +15,4 @@ path = "src/main.rs"
 rpi-ng-core = { path = "../rpi-ng-core" }
 eframe = { version = "0.37", features = ["default_fonts"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
