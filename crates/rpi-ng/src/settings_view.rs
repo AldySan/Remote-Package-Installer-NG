@@ -1,15 +1,21 @@
 //! Settings window (persisted via the engine).
+//!
+//! The editable draft lives on [`App`] so it survives across frames: a
+//! per-frame local clone would reset on every repaint and silently drop
+//! every edit before the user could press Save (the v0.0.1 settings bug).
 
 use eframe::egui;
 
-use rpi_ng_core::settings::ThemeMode;
+use rpi_ng_core::settings::{FailurePolicy, ThemeMode};
 
 use crate::app::App;
 
 pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
-    // Local edits are applied to a scratch copy; Save pushes them through the
-    // engine (which persists them).
-    let mut draft = app.settings.clone();
+    let Some(draft) = app.settings_draft.as_mut() else {
+        // No draft means the window is not supposed to be open.
+        *open = false;
+        return;
+    };
     let mut save = false;
     egui::Window::new("Settings")
         .open(open)
@@ -76,7 +82,37 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                     ui.end_row();
 
                     ui.label("Queue");
-                    ui.checkbox(&mut draft.auto_advance, "Start the next item automatically");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut draft.auto_advance, "Start the next item automatically");
+                    });
+                    ui.end_row();
+
+                    ui.label("When a transfer fails");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("on_failure")
+                            .selected_text(failure_label(draft.on_failure))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut draft.on_failure,
+                                    FailurePolicy::Continue,
+                                    "Continue with the next package",
+                                );
+                                ui.selectable_value(
+                                    &mut draft.on_failure,
+                                    FailurePolicy::Pause,
+                                    "Pause the queue",
+                                );
+                            });
+                    });
+                    ui.end_row();
+
+                    ui.label("Updates");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(
+                            &mut draft.auto_check_updates,
+                            "Check for updates on startup",
+                        );
+                    });
                     ui.end_row();
                 });
 
@@ -86,13 +122,17 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                     save = true;
                 }
                 ui.label(
-                    egui::RichText::new("The file-server port applies the next time you connect.")
-                        .small()
-                        .weak(),
+                    egui::RichText::new(
+                        "The file-server port applies the next time you connect. The update \
+                         check only asks GitHub for the latest release tag — nothing else \
+                         is sent.",
+                    )
+                    .small()
+                    .weak(),
                 );
             });
         });
-    if save {
+    if save && let Some(draft) = app.settings_draft.clone() {
         app.settings = draft.clone();
         app.send(rpi_ng_core::Command::SetSettings(Box::new(draft)));
     }
@@ -103,5 +143,12 @@ fn theme_label(mode: ThemeMode) -> &'static str {
         ThemeMode::System => "System",
         ThemeMode::Light => "Light",
         ThemeMode::Dark => "Dark",
+    }
+}
+
+fn failure_label(policy: FailurePolicy) -> &'static str {
+    match policy {
+        FailurePolicy::Continue => "Continue with the next package",
+        FailurePolicy::Pause => "Pause the queue",
     }
 }

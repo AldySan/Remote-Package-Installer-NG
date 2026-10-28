@@ -8,15 +8,30 @@ use rpi_ng_core::{
     Command, EngineHandle,
     model::{ConsoleCandidate, ConsoleStatus, Event, ItemState, LogLevel, QueueItem, Snapshot},
     settings::{Settings, ThemeMode},
+    update::UpdateInfo,
 };
 
-use crate::{connect_view, dialogs, log_view, queue_view, settings_view};
+use crate::{connect_view, dialogs, log_view, queue_view, settings_view, updater::Updater};
 
 const MAX_LOG_LINES: usize = 500;
+
+/// State of the in-app update check.
+#[derive(Debug, Clone, PartialEq)]
+enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(UpdateInfo),
+    Failed(String),
+}
 
 pub struct App {
     engine: Option<EngineHandle>,
     pub(crate) settings: Settings,
+    /// Editable copy shown while the settings window is open. It must live
+    /// here (not as a per-frame local) or every edit is dropped before the
+    /// user can press Save — that was the v0.0.1 settings bug.
+    pub(crate) settings_draft: Option<Settings>,
     pub(crate) snapshot: Snapshot,
     pub(crate) logs: VecDeque<(u64, LogLevel, String)>,
     /// Latest discovery results (empty until a scan finishes).
@@ -27,6 +42,10 @@ pub struct App {
     show_settings: bool,
     show_log: bool,
     show_about: bool,
+    /// In-app update checker (background thread + polled channel).
+    updater: Updater,
+    update_status: UpdateStatus,
+    show_update_window: bool,
     pub(crate) dialog: Option<dialogs::DialogPick>,
     /// Folder awaiting a recursive/flat choice.
     pub(crate) pending_folder: Option<PathBuf>,
@@ -38,14 +57,22 @@ impl App {
     pub fn new() -> Self {
         let settings = Settings::load();
         let auto_discovery = settings.discovery_enabled;
+        let auto_update_check = settings.auto_check_updates;
         let engine = rpi_ng_core::spawn(settings.clone());
         // Kick off a discovery sweep on first run if enabled.
         if auto_discovery {
             engine.send(Command::Discover);
         }
+        let mut updater = Updater::new();
+        let mut update_status = UpdateStatus::Idle;
+        if auto_update_check {
+            updater.kick();
+            update_status = UpdateStatus::Checking;
+        }
         Self {
             engine: Some(engine),
             settings,
+            settings_draft: None,
             snapshot: Snapshot::default(),
             logs: VecDeque::new(),
             discovered: Vec::new(),
@@ -55,6 +82,9 @@ impl App {
             show_settings: false,
             show_log: true,
             show_about: false,
+            updater,
+            update_status,
+            show_update_window: false,
             dialog: None,
             pending_folder: None,
             force_connect_view: false,
@@ -70,7 +100,13 @@ impl App {
     }
 
     fn apply_theme(&self, ctx: &egui::Context) {
-        let pref = match self.settings.theme {
+        // Live preview: while the settings window is open, render with the
+        // draft's theme so the user sees the change before pressing Save.
+        let theme = self
+            .settings_draft
+            .as_ref()
+            .map_or(self.settings.theme, |draft| draft.theme);
+        let pref = match theme {
             ThemeMode::System => egui::ThemePreference::System,
             ThemeMode::Light => egui::ThemePreference::Light,
             ThemeMode::Dark => egui::ThemePreference::Dark,
@@ -96,6 +132,12 @@ impl App {
                 Event::DiscoveryDone(found) => {
                     self.discovered = found;
                     self.discovery_running = false;
+                }
+                Event::SettingsChanged(s) => {
+                    // Authoritative refresh from the engine (SetSettings echo,
+                    // remembered-console updates). The settings-window draft
+                    // is separate state and is intentionally left alone.
+                    self.settings = s;
                 }
             }
         }
@@ -183,12 +225,164 @@ impl App {
     fn connected(&self) -> bool {
         matches!(self.snapshot.console.status, ConsoleStatus::Connected)
     }
+
+    /// Poll the update-checker channel and fold results into the UI state.
+    /// Every outcome is logged to the activity panel so even the silent
+    /// startup check is visible to anyone who cares.
+    fn poll_update(&mut self) {
+        let Some(result) = self.updater.poll() else {
+            return;
+        };
+        let entry = match result {
+            Ok(Some(info)) => {
+                self.update_status = UpdateStatus::Available(info.clone());
+                self.show_update_window = true;
+                (
+                    LogLevel::Info,
+                    format!(
+                        "Update available: {} (you have {}) — see the download page for \
+                         installers",
+                        info.tag,
+                        rpi_ng_core::VERSION
+                    ),
+                )
+            }
+            Ok(None) => {
+                self.update_status = UpdateStatus::UpToDate;
+                (
+                    LogLevel::Info,
+                    format!("You are on the latest release ({})", rpi_ng_core::VERSION),
+                )
+            }
+            Err(e) => {
+                self.update_status = UpdateStatus::Failed(e.clone());
+                (LogLevel::Warn, format!("Update check failed: {e}"))
+            }
+        };
+        self.logs
+            .push_back((rpi_ng_core::model::unix_ms(), entry.0, entry.1));
+        while self.logs.len() > MAX_LOG_LINES {
+            self.logs.pop_front();
+        }
+    }
+
+    fn update_controls(&mut self, ui: &mut egui::Ui) {
+        match self.update_status.clone() {
+            UpdateStatus::Checking => {
+                ui.add_enabled(false, egui::Button::new("Checking…"));
+            }
+            UpdateStatus::Available(ref info) => {
+                if ui
+                    .button(
+                        egui::RichText::new(format!("New: {}", info.tag))
+                            .strong()
+                            .color(egui::Color32::from_rgb(34, 197, 94)),
+                    )
+                    .on_hover_text("A newer release is available — click for details")
+                    .clicked()
+                {
+                    self.show_update_window = true;
+                }
+            }
+            status => {
+                let label = match status {
+                    UpdateStatus::UpToDate => "Check for updates ✓",
+                    _ => "Check for updates",
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text("Ask GitHub for a newer release of this app")
+                    .clicked()
+                {
+                    self.updater.kick();
+                    self.update_status = UpdateStatus::Checking;
+                    self.show_update_window = true;
+                }
+            }
+        }
+    }
+
+    fn update_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_update_window;
+        let status = self.update_status.clone();
+        let mut check_again = false;
+        egui::Window::new("Software update")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .min_width(400.0)
+            .show(ctx, |ui| {
+                match &status {
+                    UpdateStatus::Idle | UpdateStatus::Checking => {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new());
+                            ui.label("Checking GitHub for a newer release…");
+                        });
+                    }
+                    UpdateStatus::Available(info) => {
+                        ui.heading("Update available");
+                        ui.add_space(6.0);
+                        ui.label(format!(
+                            "Version {} is available — you have {}.",
+                            info.version,
+                            rpi_ng_core::VERSION
+                        ));
+                        ui.add_space(8.0);
+                        ui.hyperlink_to("Open the download page", &info.url);
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "The page lists the installers for Windows, macOS and Linux.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    UpdateStatus::UpToDate => {
+                        ui.heading("You are up to date");
+                        ui.add_space(6.0);
+                        ui.label(format!(
+                            "{} is the latest published release.",
+                            rpi_ng_core::VERSION
+                        ));
+                    }
+                    UpdateStatus::Failed(reason) => {
+                        ui.heading("Could not check for updates");
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(reason.clone())
+                                .small()
+                                .color(egui::Color32::from_rgb(239, 68, 68)),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "This is usually a connection problem or a temporary GitHub \
+                                 rate limit — trying again later is fine.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
+                }
+                ui.add_space(10.0);
+                if ui.button("Check again").clicked() {
+                    check_again = true;
+                }
+            });
+        self.show_update_window = open;
+        if check_again {
+            self.updater.kick();
+            self.update_status = UpdateStatus::Checking;
+        }
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.apply_theme(ui.ctx());
         let busy = self.poll_engine();
+        self.poll_update();
         self.poll_dialog();
         self.poll_dropped_files(ui.ctx());
         self.folder_choice(ui.ctx());
@@ -213,7 +407,16 @@ impl eframe::App for App {
                     }
                     if ui.button("Settings…").clicked() {
                         self.show_settings = !self.show_settings;
+                        // Seed the draft from the (engine-kept-fresh) settings
+                        // on open; discard it on toggle-off.
+                        self.settings_draft = if self.show_settings {
+                            Some(self.settings.clone())
+                        } else {
+                            None
+                        };
                     }
+                    ui.separator();
+                    self.update_controls(ui);
                 });
             });
             ui.add_space(4.0);
@@ -243,11 +446,18 @@ impl eframe::App for App {
             let mut open = self.show_settings;
             settings_view::show(self, ui.ctx(), &mut open);
             self.show_settings = open;
+            if !self.show_settings {
+                // Closed via the window's ✕ — discard unsaved edits.
+                self.settings_draft = None;
+            }
         }
         if self.show_about {
             let mut open = self.show_about;
             about_window(ui.ctx(), &mut open);
             self.show_about = open;
+        }
+        if self.show_update_window {
+            self.update_window(ui.ctx());
         }
 
         // Repaint cadence: only while something is actually happening —
@@ -257,7 +467,8 @@ impl eframe::App for App {
             || self.discovery_running
             || matches!(self.snapshot.console.status, ConsoleStatus::Probing)
             || self.dialog.is_some()
-            || self.pending_folder.is_some();
+            || self.pending_folder.is_some()
+            || self.updater.busy;
         if active {
             ui.ctx().request_repaint_after(Duration::from_millis(150));
         }
