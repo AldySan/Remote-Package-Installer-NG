@@ -101,6 +101,141 @@ pub struct FindTaskRequest {
 }
 
 // ---------------------------------------------------------------------------
+// v2 API (Remote PKG Installer NextGen and future v2 speakers)
+//
+// Wire shapes verified against the NextGen server implementation
+// (`docs/API.md` + `server.c`): strict JSON, real numbers (no hex quirks).
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v2/system` — backend identity and health.
+#[derive(Debug, Deserialize, Clone)]
+pub struct V2SystemResponse {
+    pub status: String,
+    pub data: V2SystemData,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct V2SystemData {
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub title_id: String,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub storage: V2Storage,
+    #[serde(default)]
+    pub active_jobs: i64,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
+pub struct V2Storage {
+    #[serde(default)]
+    pub free: u64,
+    #[serde(default)]
+    pub total: u64,
+}
+
+/// `POST /api/v2/install` — accepts `url` (single) or `urls` (multipart).
+#[derive(Debug, Serialize)]
+pub struct V2InstallRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub urls: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct V2InstallResponse {
+    pub status: String,
+    pub data: V2InstallData,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct V2InstallData {
+    pub job_id: i64,
+    pub task_id: i64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_u64")]
+    pub package_size: u64,
+}
+
+/// `GET /api/v2/jobs` — every job the console still remembers (terminal
+/// states included; jobs vanish only when the console app restarts or its
+/// registry reclaims a slot).
+#[derive(Debug, Deserialize, Clone)]
+pub struct V2JobsResponse {
+    pub status: String,
+    pub data: V2JobsData,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct V2JobsData {
+    #[serde(default)]
+    pub jobs: Vec<V2Job>,
+}
+
+/// One entry of the v2 jobs list. Field names mirror the wire format.
+#[derive(Debug, Deserialize, Clone)]
+pub struct V2Job {
+    pub id: i64,
+    #[serde(default)]
+    pub bgft_task_id: i64,
+    pub state: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content_id: String,
+    #[serde(default)]
+    pub app_ver: String,
+    #[serde(default)]
+    pub content_type: String,
+    #[serde(default)]
+    pub pieces: u32,
+    #[serde(default)]
+    pub package_size: u64,
+    #[serde(default)]
+    pub transferred: u64,
+    #[serde(default)]
+    pub length_total: u64,
+    #[serde(default)]
+    pub percent: i32,
+    #[serde(default)]
+    pub speed_bps: f64,
+    #[serde(default)]
+    pub is_patch: bool,
+    #[serde(default)]
+    pub error: i64,
+    #[serde(default)]
+    pub rest_sec: u64,
+    #[serde(default)]
+    pub num_index: u32,
+    #[serde(default)]
+    pub num_total: u32,
+}
+
+/// v2 job states, as emitted by the console (`taskman.c`).
+pub mod v2_states {
+    pub const PENDING: &str = "pending";
+    pub const PREPARING: &str = "preparing";
+    pub const REGISTERED: &str = "registered";
+    pub const RUNNING: &str = "running";
+    pub const PAUSED: &str = "paused";
+    pub const COMPLETED: &str = "completed";
+    pub const ALREADY_INSTALLED: &str = "already_installed";
+    pub const FAILED: &str = "failed";
+    pub const STOPPED: &str = "stopped";
+}
+
+// ---------------------------------------------------------------------------
 // Responses
 // ---------------------------------------------------------------------------
 
@@ -112,6 +247,9 @@ pub struct InstallResponse {
     pub task_id: i64,
     #[serde(default)]
     pub title: Option<String>,
+    /// v2 installs carry a console-side job id for the lifecycle endpoints.
+    #[serde(default)]
+    pub job_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
