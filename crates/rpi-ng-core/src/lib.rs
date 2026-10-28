@@ -17,6 +17,7 @@ pub mod queue;
 pub mod rpi;
 pub mod settings;
 pub mod sfo;
+pub mod update;
 
 pub use engine::{Command, EngineHandle, spawn};
 pub use model::Event;

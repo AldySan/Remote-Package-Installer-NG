@@ -3,3 +3,11 @@
 # found"). See docs/BUILDING.md for the full release-profile story.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# The update checker's TLS stack (rustls + aws-lc-rs) needs NASM on Windows
+# x64 to assemble its crypto routines. Most machines (and CI runners) don't
+# have NASM installed, so fall back to the prebuilt objects aws-lc ships.
+# Harmless on Linux/macOS: the variable is only consulted for Windows x64
+# builds (and if NASM *is* installed it is used normally).
+[env]
+AWS_LC_SYS_PREBUILT_NASM = "1"
