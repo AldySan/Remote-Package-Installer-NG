@@ -136,6 +136,11 @@ pub fn spawn_with(settings: Settings, data_dir: Option<PathBuf>) -> EngineHandle
     runtime.spawn(async move {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
         let mut inner = EngineInner::new(settings.clone(), evt_tx, internal_tx, data_dir.clone());
+        // While the file server runs, re-snapshot at a steady cadence so the
+        // live transfer rates in the UI keep updating (and decay to zero when
+        // a transfer finishes) even between poll ticks.
+        let mut rate_ticker = tokio::time::interval(Duration::from_millis(250));
+        rate_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cmd_rx = cmd_rx;
         loop {
             tokio::select! {
@@ -147,6 +152,9 @@ pub fn spawn_with(settings: Settings, data_dir: Option<PathBuf>) -> EngineHandle
                 }
                 Some(msg) = internal_rx.recv() => {
                     inner.handle_internal(msg).await;
+                }
+                _ = rate_ticker.tick(), if inner.has_server() => {
+                    // Rates only — no queue work, no console traffic.
                 }
             }
             inner.emit_snapshot();
@@ -264,9 +272,17 @@ impl EngineInner {
     }
 
     fn emit_snapshot(&self) {
-        let server = self.server.as_ref().map(|s| ServerInfo {
-            bind: s.bind,
-            base_url: s.base_url.clone(),
+        let server = self.server.as_ref().map(|s| {
+            let (tx_bps, rx_bps) = s.stats().rates();
+            let (tx_total, rx_total, _) = s.stats().totals();
+            ServerInfo {
+                bind: s.bind,
+                base_url: s.base_url.clone(),
+                tx_bps,
+                rx_bps,
+                tx_total,
+                rx_total,
+            }
         });
         let snap = Snapshot {
             items: self.queue.items().to_vec(),
@@ -288,6 +304,11 @@ impl EngineInner {
 
     fn settings(&self) -> Settings {
         self.settings.lock().unwrap().clone()
+    }
+
+    /// True while the local file server is up (gates the rate ticker).
+    fn has_server(&self) -> bool {
+        self.server.is_some()
     }
 
     // -- command handling ---------------------------------------------------
