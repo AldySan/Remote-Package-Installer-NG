@@ -17,13 +17,13 @@ use crate::{
     discovery,
     fileserver::FileServer,
     model::{
-        ConsoleCandidate, ConsoleGeneration, ConsoleInfo, ConsoleStatus, ConsoleTarget, Event,
-        ItemId, ItemState, LogLevel, PartId, ProgressView, QueueItem, ServerInfo, Snapshot,
-        unix_ms,
+        BackendIdentity, ConsoleCandidate, ConsoleGeneration, ConsoleInfo, ConsoleStatus,
+        ConsoleTarget, Event, ItemId, ItemState, LogLevel, PartId, ProgressView, QueueItem,
+        ServerInfo, Snapshot, unix_ms,
     },
     pkg::{self, parse_pkg_file},
     queue::Queue,
-    rpi::{RpiClient, RpiError},
+    rpi::{RpiClient, RpiError, types::V2Job},
     settings::{RememberedConsole, Settings},
 };
 
@@ -181,11 +181,19 @@ enum Internal {
         item: ItemId,
         result: Result<ProgressView, RpiError>,
     },
+    /// v2 poller: the console's job entry, or `None` when the job vanished
+    /// from the registry (console app restarted / slot reclaimed).
+    V2JobUpdate {
+        item: ItemId,
+        result: Result<Option<V2Job>, RpiError>,
+    },
 }
 
 struct ActiveTask {
     item_id: ItemId,
     task_id: i64,
+    /// v2 job id when the backend tracks jobs (NextGen-class).
+    job_id: Option<i64>,
     poll_cancel: watch::Sender<bool>,
 }
 
@@ -290,11 +298,14 @@ impl EngineInner {
             }
             Command::Pause => {
                 self.running = false;
-                let ids = self.active.as_ref().map(|a| (a.task_id, a.item_id));
-                if let Some((task_id, item_id)) = ids {
+                let ids = self
+                    .active
+                    .as_ref()
+                    .map(|a| (a.task_id, a.item_id, a.job_id));
+                if let Some((task_id, item_id, job_id)) = ids {
                     // Best-effort remote pause; the poller keeps watching so a
                     // completion or console-side error is still observed.
-                    self.pause_remote(task_id).await;
+                    self.pause_remote(task_id, job_id).await;
                     if let Some(item) = self.queue.get_mut(item_id) {
                         item.state = ItemState::Paused;
                         item.updated_at = unix_ms();
@@ -484,26 +495,24 @@ impl EngineInner {
                 self.persist_queue();
                 self.log(
                     LogLevel::Warn,
-                    format!("Cancelled item #{id}; remote task {task_id} stop/unregister was best-effort — verify on the console if it still appears"),
+                    format!("Cancelled item #{id}; remote stop of task {task_id} was best-effort — verify on the console if it still appears"),
                 );
             }
         } else if let Some(item) = self.queue.get_mut(id)
             && !item.state.is_active()
         {
             let task_id = item.task_id;
+            let job_id = item.job_id;
             item.state = ItemState::Cancelled;
             item.updated_at = unix_ms();
             self.persist_queue();
             // A paused/unknown item may still hold a live console task:
             // clean it up best-effort too.
-            if let Some(task_id) = task_id
-                && let Some(client) = self.client.clone()
-            {
-                let _ = client.stop_task(task_id).await;
-                let _ = client.unregister_task(task_id).await;
+            if let Some(task_id) = task_id {
+                self.stop_remote(task_id, job_id).await;
                 self.log(
                     LogLevel::Warn,
-                    format!("Cancelled item #{id}; remote task {task_id} stop/unregister was best-effort — verify on the console if it still appears"),
+                    format!("Cancelled item #{id}; remote stop was best-effort — verify on the console if it still appears"),
                 );
             } else {
                 self.log(LogLevel::Info, format!("Cancelled item #{id}"));
@@ -524,6 +533,10 @@ impl EngineInner {
                 kind: outcome.kind,
                 caps: outcome.caps,
                 label: None,
+                backend: outcome.identity.map(|sys| BackendIdentity {
+                    name: sys.name,
+                    version: sys.version,
+                }),
             });
             let _ = tx.send(Internal::ProbeDone { addr, result });
         });
@@ -589,9 +602,15 @@ impl EngineInner {
                     self.console = Some(target.clone());
                     self.console_status = ConsoleStatus::Connected;
                     self.client = Some(RpiClient::new(addr, Duration::from_secs(15)));
+                    let backend = target
+                        .backend
+                        .as_ref()
+                        .map(|b| format!(" ({b})"))
+                        .unwrap_or_default();
+                    let v2 = if target.caps.api_v2 { ", v2 API" } else { "" };
                     self.log(
                         LogLevel::Info,
-                        format!("Connected to {addr} ({})", target.kind),
+                        format!("Connected to {addr} ({}{v2}){backend}", target.kind),
                     );
                     self.remember_console(addr);
                     self.start_server_for(addr).await;
@@ -634,21 +653,41 @@ impl EngineInner {
                                 // Disconnected while the request was in flight;
                                 // remember the task id for reconcile().
                                 it.task_id = Some(task_id);
+                                it.job_id = resp.job_id;
                                 it.updated_at = unix_ms();
                                 self.persist_queue();
                             }
                             // Cancelled/removed meanwhile: best-effort cleanup so the
                             // console does not keep a ghost task.
-                            if task_id > 0
-                                && let Some(client) = self.client.clone()
-                            {
-                                let _ = client.stop_task(task_id).await;
-                                let _ = client.unregister_task(task_id).await;
+                            if task_id > 0 {
+                                self.stop_remote(task_id, resp.job_id).await;
                             }
                             return;
                         }
+                        if task_id == -1 {
+                            // Both dialects use task_id -1 for "already
+                            // installed": the console reports the outcome
+                            // directly, no task to track.
+                            if let Some(it) = self.queue.get_mut(item) {
+                                it.task_id = None;
+                                it.job_id = resp.job_id;
+                                it.console_title = resp.title.clone();
+                                it.state = ItemState::Completed;
+                                it.error = None;
+                                it.updated_at = unix_ms();
+                            }
+                            self.persist_queue();
+                            self.log(
+                                LogLevel::Info,
+                                format!("Item #{item}: console reports already installed"),
+                            );
+                            self.maybe_start_next().await;
+                            return;
+                        }
+                        let job_id = resp.job_id;
                         if let Some(it) = self.queue.get_mut(item) {
                             it.task_id = Some(task_id);
+                            it.job_id = job_id;
                             it.console_title = resp.title.clone();
                             it.state = ItemState::Transferring;
                             it.updated_at = unix_ms();
@@ -656,7 +695,7 @@ impl EngineInner {
                         self.poll_failures = 0;
                         self.copy_phase_stalls = 0;
                         self.last_sample = None;
-                        self.spawn_poller(item, task_id);
+                        self.spawn_poller(item, task_id, job_id);
                         self.persist_queue();
                         self.log(
                             LogLevel::Info,
@@ -665,7 +704,7 @@ impl EngineInner {
                         // A pause may have arrived while the request was in
                         // flight (there was no task id to pause yet): apply it now.
                         if !self.running {
-                            self.pause_remote(task_id).await;
+                            self.pause_remote(task_id, job_id).await;
                             if let Some(it) = self.queue.get_mut(item) {
                                 it.state = ItemState::Paused;
                                 it.updated_at = unix_ms();
@@ -745,6 +784,9 @@ impl EngineInner {
             }
             Internal::ProgressUpdate { item, result } => {
                 self.handle_progress(item, result).await;
+            }
+            Internal::V2JobUpdate { item, result } => {
+                self.handle_v2_job_update(item, result).await;
             }
         }
     }
@@ -846,13 +888,20 @@ impl EngineInner {
     }
 
     /// Ensure parts are registered, then POST the install request.
+    /// v2 backends install through `/api/v2/install`; legacy through
+    /// `/api/install`.
     async fn submit(&mut self, item: ItemId, urls: Vec<String>) {
         let Some(client) = self.client.clone() else {
             return;
         };
+        let use_v2 = self.v2_mode();
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
-            let result = client.install_direct(&urls).await;
+            let result = if use_v2 {
+                client.v2_install(&urls).await
+            } else {
+                client.install_direct(&urls).await
+            };
             let _ = tx.send(Internal::SubmitResult { item, result });
         });
     }
@@ -916,7 +965,7 @@ impl EngineInner {
 
     // -- progress -------------------------------------------------------------
 
-    fn spawn_poller(&mut self, item: ItemId, task_id: i64) {
+    fn spawn_poller(&mut self, item: ItemId, task_id: i64, job_id: Option<i64>) {
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -924,6 +973,7 @@ impl EngineInner {
         self.active = Some(ActiveTask {
             item_id: item,
             task_id,
+            job_id,
             poll_cancel: cancel_tx,
         });
         let interval = self.settings().poll_interval;
@@ -934,8 +984,18 @@ impl EngineInner {
                     _ = tokio::time::sleep(interval) => {},
                     _ = cancel_rx.wait_for(|&c| c) => break,
                 }
-                let result = client.task_progress(task_id).await;
-                let _ = tx.send(Internal::ProgressUpdate { item, result });
+                if job_id.is_some() {
+                    // v2: one jobs request covers every tracked item; find
+                    // this item's job by id (task id as a safety net).
+                    let result = client.v2_jobs().await.map(|jobs| {
+                        jobs.into_iter()
+                            .find(|j| Some(j.id) == job_id || j.bgft_task_id == task_id)
+                    });
+                    let _ = tx.send(Internal::V2JobUpdate { item, result });
+                } else {
+                    let result = client.task_progress(task_id).await;
+                    let _ = tx.send(Internal::ProgressUpdate { item, result });
+                }
             }
         });
     }
@@ -1020,39 +1080,144 @@ impl EngineInner {
                 }
             }
             Err(e) => {
-                // Error paths: transient (console suspended/asleep) vs permanent.
-                let transient = e.is_transient();
-                let item_gone = matches!(
-                    &e,
-                    RpiError::BackendError { code, .. } if *code == 0x8099_0019
+                self.handle_poll_error(item, e).await;
+            }
+        }
+    }
+
+    /// Error handling shared by the legacy and v2 pollers: transient vs
+    /// permanent errors, and the "task no longer known" terminal case.
+    async fn handle_poll_error(&mut self, item: ItemId, e: RpiError) {
+        let transient = e.is_transient();
+        let item_gone = matches!(
+            &e,
+            RpiError::BackendError { code, .. } if *code == 0x8099_0019
+        );
+        if item_gone {
+            if let Some(it) = self.queue.get_mut(item) {
+                it.state = ItemState::Unknown;
+                it.error = Some(
+                    "The console no longer knows this task (it may have completed or been removed) — verify on the console, then retry or mark completed"
+                        .into(),
                 );
-                if item_gone {
-                    if let Some(it) = self.queue.get_mut(item) {
-                        it.state = ItemState::Unknown;
-                        it.error = Some(
-                            "The console no longer knows this task (it may have completed or been removed) — verify on the console, then retry or mark completed"
-                                .into(),
-                        );
-                    }
-                    self.stop_poller();
-                    self.persist_queue();
-                    self.maybe_start_next().await;
-                    return;
-                }
-                if transient {
-                    self.poll_failures += 1;
-                    if self.poll_failures == 3 {
-                        self.console_status = ConsoleStatus::Lost;
-                        self.log(
-                            LogLevel::Error,
-                            format!("Console stopped answering while installing ({e}). Keep the installer app in the foreground on the console; reconnect to resume monitoring."),
-                        );
-                    }
+            }
+            self.stop_poller();
+            self.persist_queue();
+            self.maybe_start_next().await;
+            return;
+        }
+        if transient {
+            self.poll_failures += 1;
+            if self.poll_failures == 3 {
+                self.console_status = ConsoleStatus::Lost;
+                self.log(
+                    LogLevel::Error,
+                    format!("Console stopped answering while installing ({e}). Keep the installer app in the foreground on the console; reconnect to resume monitoring."),
+                );
+            }
+        } else {
+            if let Some(it) = self.queue.get_mut(item) {
+                it.error = Some(format!("progress error: {e}"));
+            }
+            self.log(LogLevel::Warn, format!("Progress error: {e}"));
+        }
+    }
+
+    /// v2 poller: fold a job entry (or its absence) into the item state.
+    ///
+    /// Terminal job states come straight from the console's own task manager
+    /// (`taskman.c`), so they count as evidence: `completed` requires the
+    /// console to have observed full transfer without error, `failed` carries
+    /// the console error code. A job missing from the list means the console
+    /// app restarted or reclaimed the slot — the outcome is genuinely unknown.
+    async fn handle_v2_job_update(
+        &mut self,
+        item: ItemId,
+        result: Result<Option<V2Job>, RpiError>,
+    ) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        if active.item_id != item {
+            return; // stale poll for a job we no longer track
+        }
+        let job = match result {
+            Ok(job) => job,
+            Err(e) => {
+                self.handle_poll_error(item, e).await;
+                return;
+            }
+        };
+        let Some(job) = job else {
+            if let Some(it) = self.queue.get_mut(item) {
+                it.state = ItemState::Unknown;
+                it.error = Some(
+                    "The console no longer lists this job (its app may have restarted) — verify on the console, then retry or mark completed"
+                        .into(),
+                );
+            }
+            self.stop_poller();
+            self.persist_queue();
+            self.maybe_start_next().await;
+            return;
+        };
+        self.poll_failures = 0;
+
+        use crate::rpi::types::v2_states as st;
+        let pv = v2_job_progress(&job);
+
+        let Some(it) = self.queue.get_mut(item) else {
+            return;
+        };
+        it.progress = Some(pv);
+        it.updated_at = unix_ms();
+        if it.task_id.is_none() && job.bgft_task_id > 0 {
+            it.task_id = Some(job.bgft_task_id);
+        }
+        if it.job_id.is_none() {
+            it.job_id = Some(job.id);
+        }
+
+        let transferred_done = job.length_total > 0 && job.transferred >= job.length_total;
+        match job.state.as_str() {
+            st::COMPLETED | st::ALREADY_INSTALLED => {
+                it.state = ItemState::Completed;
+                it.error = None;
+                self.log(
+                    LogLevel::Info,
+                    format!("Item #{item} completed (console job state: {})", job.state),
+                );
+                self.stop_poller_and_continue().await;
+            }
+            st::FAILED => {
+                let gloss =
+                    crate::rpi::explain_error_code(job.error).unwrap_or("unknown console error");
+                it.state = ItemState::Failed;
+                it.error = Some(format!("console error 0x{:X}: {gloss}", job.error));
+                self.log(
+                    LogLevel::Error,
+                    format!("Item #{item} failed: console job error 0x{:X}", job.error),
+                );
+                self.stop_poller_and_continue().await;
+            }
+            st::STOPPED => {
+                it.state = ItemState::Cancelled;
+                it.error = Some("Console reports the job was stopped".into());
+                self.log(
+                    LogLevel::Warn,
+                    format!("Item #{item}: console reports the job was stopped"),
+                );
+                self.stop_poller_and_continue().await;
+            }
+            st::PAUSED => {
+                // Console-side pause (dashboard or this app): keep Paused.
+                it.state = ItemState::Paused;
+            }
+            _ => {
+                if transferred_done {
+                    it.state = ItemState::Installing;
                 } else {
-                    if let Some(it) = self.queue.get_mut(item) {
-                        it.error = Some(format!("progress error: {e}"));
-                    }
-                    self.log(LogLevel::Warn, format!("Progress error: {e}"));
+                    it.state = ItemState::Transferring;
                 }
             }
         }
@@ -1073,7 +1238,14 @@ impl EngineInner {
     /// re-attach a poller when this item is not the monitored one. Honors the
     /// single-active-task invariant.
     async fn resume_item(&mut self, id: ItemId) {
-        let Some(task_id) = self.queue.get(id).and_then(|i| i.task_id) else {
+        let Some((task_id, job_id)) = self.queue.get(id).map(|i| (i.task_id, i.job_id)) else {
+            self.log(
+                LogLevel::Warn,
+                format!("Item #{id} has no console task to resume — use Retry instead"),
+            );
+            return;
+        };
+        let Some(task_id) = task_id else {
             self.log(
                 LogLevel::Warn,
                 format!("Item #{id} has no console task to resume — use Retry instead"),
@@ -1089,13 +1261,13 @@ impl EngineInner {
             return;
         }
         self.running = true;
-        self.resume_remote(task_id).await;
+        self.resume_remote(task_id, job_id).await;
         if let Some(item) = self.queue.get_mut(id) {
             item.state = ItemState::Transferring;
             item.updated_at = unix_ms();
         }
         if !is_monitored {
-            self.spawn_poller(id, task_id);
+            self.spawn_poller(id, task_id, job_id);
         }
         self.persist_queue();
         self.log(
@@ -1104,15 +1276,47 @@ impl EngineInner {
         );
     }
 
-    async fn pause_remote(&mut self, task_id: i64) {
+    /// The connected backend speaks the v2 job API right now.
+    fn v2_mode(&self) -> bool {
+        self.console
+            .as_ref()
+            .map(|c| c.caps.api_v2)
+            .unwrap_or(false)
+    }
+
+    /// Pause the console-side task. The endpoint is chosen by the CURRENT
+    /// backend capabilities: an item carrying a v2 job id may be resumed
+    /// after reconnecting to a legacy-only backend, and vice versa.
+    async fn pause_remote(&mut self, task_id: i64, job_id: Option<i64>) {
         if let Some(client) = self.client.clone() {
-            let _ = client.pause_task(task_id).await;
+            let _ = match (self.v2_mode(), job_id) {
+                (true, Some(job)) => client.v2_job_op(job, "pause").await,
+                _ => client.pause_task(task_id).await,
+            };
         }
     }
 
-    async fn resume_remote(&mut self, task_id: i64) {
+    async fn resume_remote(&mut self, task_id: i64, job_id: Option<i64>) {
         if let Some(client) = self.client.clone() {
-            let _ = client.resume_task(task_id).await;
+            let _ = match (self.v2_mode(), job_id) {
+                (true, Some(job)) => client.v2_job_op(job, "resume").await,
+                _ => client.resume_task(task_id).await,
+            };
+        }
+    }
+
+    /// Stop a console-side task or job (best-effort).
+    async fn stop_remote(&mut self, task_id: i64, job_id: Option<i64>) {
+        if let Some(client) = self.client.clone() {
+            match (self.v2_mode(), job_id) {
+                (true, Some(job)) => {
+                    let _ = client.v2_job_op(job, "stop").await;
+                }
+                _ => {
+                    let _ = client.stop_task(task_id).await;
+                    let _ = client.unregister_task(task_id).await;
+                }
+            }
         }
     }
 
@@ -1120,10 +1324,7 @@ impl EngineInner {
     async fn stop_active_remote(&mut self) {
         if let Some(active) = self.active.take() {
             let _ = active.poll_cancel.send(true);
-            if let Some(client) = self.client.clone() {
-                let _ = client.stop_task(active.task_id).await;
-                let _ = client.unregister_task(active.task_id).await;
-            }
+            self.stop_remote(active.task_id, active.job_id).await;
         }
         self.last_sample = None;
     }
@@ -1203,6 +1404,182 @@ impl EngineInner {
     /// single active task); the rest keep their state with a hint so the user
     /// resumes them deliberately. Never resubmits blindly.
     async fn reconcile(&mut self) {
+        if self.v2_mode() {
+            self.reconcile_v2().await;
+        } else {
+            self.reconcile_legacy().await;
+        }
+    }
+
+    /// v2 reconcile: one jobs request replaces the find_task/per-task-progress
+    /// probing. Jobs are matched by task id first, content id second; terminal
+    /// job states resolve `Unknown` items directly.
+    async fn reconcile_v2(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let jobs = match client.v2_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                self.log(
+                    LogLevel::Warn,
+                    format!("Reconcile: v2 jobs unavailable ({e}); falling back to task probing"),
+                );
+                self.reconcile_legacy().await;
+                return;
+            }
+        };
+
+        struct Pending {
+            id: ItemId,
+            task_id: Option<i64>,
+            job_id: Option<i64>,
+            content_id: Option<String>,
+        }
+        let items: Vec<Pending> = self
+            .queue
+            .items()
+            .iter()
+            .filter(|i| matches!(i.state, ItemState::Unknown | ItemState::Paused))
+            .map(|i| Pending {
+                id: i.id,
+                task_id: i.task_id,
+                job_id: i.job_id,
+                content_id: i.content_id().map(|c| c.to_string()),
+            })
+            .collect();
+
+        let mut attached = false;
+        for pending in items {
+            let (id, task_id, job_id, content_id) = (
+                pending.id,
+                pending.task_id,
+                pending.job_id,
+                pending.content_id,
+            );
+            // Match by task id (or remembered job id), then content id.
+            let found = jobs.iter().find(|j| {
+                matches!(task_id, Some(t) if t > 0 && j.bgft_task_id == t)
+                    || matches!(job_id, Some(jid) if j.id == jid)
+            });
+            let found = match found {
+                Some(j) => Some(j),
+                None => jobs.iter().find(|j| {
+                    content_id
+                        .as_deref()
+                        .is_some_and(|c| !c.is_empty() && j.content_id == c)
+                }),
+            };
+            let Some(job) = found else {
+                if let Some(it) = self.queue.get_mut(id) {
+                    it.error = Some(
+                        "The console does not report this job anymore — verify on the console, then retry or mark completed"
+                            .into(),
+                    );
+                }
+                continue;
+            };
+
+            let task_id = if job.bgft_task_id > 0 {
+                Some(job.bgft_task_id)
+            } else {
+                task_id
+            };
+            if let Some(it) = self.queue.get_mut(id) {
+                it.task_id = task_id;
+                it.job_id = Some(job.id);
+                it.error = None;
+            }
+
+            use crate::rpi::types::v2_states as st;
+            let progress = v2_job_progress(job);
+            match job.state.as_str() {
+                st::COMPLETED | st::ALREADY_INSTALLED => {
+                    if let Some(it) = self.queue.get_mut(id) {
+                        it.state = ItemState::Completed;
+                        it.error = None;
+                        it.progress = Some(progress);
+                        it.updated_at = unix_ms();
+                    }
+                    self.log(
+                        LogLevel::Info,
+                        format!(
+                            "Item #{id} already finished on the console (job state: {})",
+                            job.state
+                        ),
+                    );
+                }
+                st::FAILED => {
+                    if let Some(it) = self.queue.get_mut(id) {
+                        it.state = ItemState::Failed;
+                        it.error = Some(format!("console error 0x{:X}", job.error));
+                        it.updated_at = unix_ms();
+                    }
+                    self.log(
+                        LogLevel::Warn,
+                        format!(
+                            "Item #{id} failed on the console while disconnected (error 0x{:X})",
+                            job.error
+                        ),
+                    );
+                }
+                st::STOPPED => {
+                    if let Some(it) = self.queue.get_mut(id) {
+                        it.state = ItemState::Cancelled;
+                        it.error = Some("Console reports the job was stopped".into());
+                        it.updated_at = unix_ms();
+                    }
+                }
+                st::PAUSED => {
+                    if let Some(it) = self.queue.get_mut(id) {
+                        it.state = ItemState::Paused;
+                    }
+                }
+                _ => {
+                    // Still active console-side.
+                    if attached {
+                        if let Some(it) = self.queue.get_mut(id) {
+                            it.error = Some(
+                                "Console still reports this job; it will be resumed after the monitored item finishes"
+                                    .into(),
+                            );
+                        }
+                        self.log(
+                            LogLevel::Info,
+                            format!(
+                                "Console still reports item #{id} (job {}); it will be resumed after the monitored item finishes",
+                                job.id
+                            ),
+                        );
+                        continue;
+                    }
+                    if let Some(it) = self.queue.get_mut(id) {
+                        it.state = if job.length_total > 0 && job.transferred >= job.length_total {
+                            ItemState::Installing
+                        } else {
+                            ItemState::Transferring
+                        };
+                        it.progress = Some(progress);
+                    }
+                    if let Some(tid) = task_id {
+                        self.spawn_poller(id, tid, Some(job.id));
+                        attached = true;
+                        self.log(
+                            LogLevel::Info,
+                            format!(
+                                "Re-attached item #{id} to console job {} (task {tid})",
+                                job.id
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        self.persist_queue();
+    }
+
+    /// Legacy reconcile: find_task per item, one progress probe by task id.
+    async fn reconcile_legacy(&mut self) {
         let items: Vec<(ItemId, Option<i64>, Option<String>, i32)> = self
             .queue
             .items()
@@ -1242,7 +1619,7 @@ impl EngineInner {
                 if let Some(it) = self.queue.get_mut(id) {
                     it.state = ItemState::Transferring;
                 }
-                self.spawn_poller(id, tid);
+                self.spawn_poller(id, tid, None);
                 attached = true;
                 self.log(
                     LogLevel::Info,
@@ -1273,7 +1650,7 @@ impl EngineInner {
                         it.progress = Some(pv);
                     }
                     if !attached {
-                        self.spawn_poller(id, tid);
+                        self.spawn_poller(id, tid, None);
                         attached = true;
                     }
                     continue;
@@ -1296,16 +1673,38 @@ impl EngineInner {
         // Best-effort console-side cleanup with a short timeout.
         if let Some(active) = self.active.take() {
             let _ = active.poll_cancel.send(true);
-            if let Some(client) = self.client.clone() {
-                let _ = client.stop_task(active.task_id).await;
-                let _ = client.unregister_task(active.task_id).await;
-            }
+            self.stop_remote(active.task_id, active.job_id).await;
         }
         if let Some(server) = self.server.take() {
             server.shutdown();
         }
         self.persist_queue();
         self.log(LogLevel::Info, "Engine shut down; state flushed");
+    }
+}
+
+/// Map a v2 job entry to the UI progress view (shared by the poller and the
+/// reconcile path).
+fn v2_job_progress(job: &V2Job) -> ProgressView {
+    ProgressView {
+        percent: if job.length_total > 0 {
+            (job.transferred as f64 / job.length_total as f64).clamp(0.0, 1.0) * 100.0
+        } else {
+            job.percent.clamp(0, 100) as f64
+        } as f32,
+        transferred: job.transferred,
+        total: job.length_total,
+        speed_bps: job.speed_bps.max(0.0) as u64,
+        eta_sec: if job.rest_sec > 0 && job.rest_sec < u32::MAX as u64 {
+            Some(job.rest_sec)
+        } else {
+            None
+        },
+        piece_index: job.num_index,
+        piece_total: job.num_total,
+        preparing_percent: 0,
+        local_copy_percent: 0,
+        raw_error: job.error,
     }
 }
 

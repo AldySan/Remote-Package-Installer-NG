@@ -283,7 +283,15 @@ impl App {
                     .console
                     .target
                     .as_ref()
-                    .map(|t| format!("{} ({})", t.kind, t.addr))
+                    .map(|t| {
+                        // Prefer the backend's own identity (v2 backends
+                        // report name + version), else the dialect kind.
+                        let who = match &t.backend {
+                            Some(b) => b.to_string(),
+                            None => t.kind.to_string(),
+                        };
+                        format!("{who} ({})", t.addr)
+                    })
                     .unwrap_or_else(|| "Connected".into());
                 (egui::Color32::GREEN, t)
             }

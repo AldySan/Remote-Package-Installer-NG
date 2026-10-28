@@ -15,7 +15,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -49,6 +49,22 @@ struct MockTask {
     error: i64,
 }
 
+/// A v2 job, mirroring the NextGen task manager's in-memory registry:
+/// jobs persist (with terminal states) until the "app restarts".
+#[derive(Debug, Clone)]
+struct MockJob {
+    id: i64,
+    task_id: i64,
+    state: String,
+    total: u64,
+    transferred: u64,
+    title: String,
+    content_id: String,
+    /// Simulated console-side pause: jobs paused via the op endpoint stop
+    /// advancing on polls.
+    paused: bool,
+}
+
 #[derive(Debug)]
 struct MockState {
     next_task_id: i64,
@@ -68,6 +84,15 @@ struct MockState {
     /// When set, install answers success WITHOUT a task id (v3.x fork
     /// dialect).
     omit_task_id: bool,
+    /// Serve the v2 API (NextGen-class backend) alongside the legacy one.
+    v2: bool,
+    next_job_id: i64,
+    jobs: std::collections::HashMap<i64, MockJob>,
+    /// When set, v2 install reports task_id -1 (already installed).
+    already_installed: bool,
+    /// Count POSTs seen on /api/v2/jobs/<id>/<op> — proves the client
+    /// exercised the POST-first fallback (NextGen answers them with 404).
+    v2_op_posts: std::collections::HashMap<String, usize>,
 }
 
 struct MockConsole {
@@ -77,6 +102,15 @@ struct MockConsole {
 
 impl MockConsole {
     async fn start(dialect: Dialect) -> Self {
+        Self::start_opt(dialect, false).await
+    }
+
+    /// Start with the v2 API enabled (NextGen-class backend).
+    async fn start_v2() -> Self {
+        Self::start_opt(Dialect::Strict, true).await
+    }
+
+    async fn start_opt(dialect: Dialect, v2: bool) -> Self {
         let state = Arc::new(Mutex::new(MockState {
             next_task_id: 1,
             tasks: Default::default(),
@@ -87,8 +121,14 @@ impl MockConsole {
             by_content: Default::default(),
             fail_installs: None,
             omit_task_id: false,
+            v2,
+            next_job_id: 1,
+            jobs: Default::default(),
+            already_installed: false,
+            v2_op_posts: Default::default(),
         }));
         let app = Router::new()
+            .route("/", get(v2_system))
             .route("/api", get(unsupported))
             .route("/api/status", get(status))
             .route("/api/is_exists", post(is_exists))
@@ -100,6 +140,13 @@ impl MockConsole {
             .route("/api/stop_task", post(ok_task))
             .route("/api/start_task", post(ok_task))
             .route("/api/unregister_task", post(ok_task))
+            .route("/api/v2/system", get(v2_system))
+            .route("/api/v2/install", post(v2_install))
+            .route("/api/v2/jobs", get(v2_jobs))
+            .route(
+                "/api/v2/jobs/{id}/{op}",
+                post(v2_op_post_404).get(v2_job_op),
+            )
             .with_state(Arc::clone(&state));
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -116,8 +163,30 @@ impl MockConsole {
         self.state.lock().unwrap().installs.clone()
     }
 
+    /// Captured v2 install bodies (`url` / `urls` requests only).
+    fn v2_installs(&self) -> Vec<Value> {
+        self.state
+            .lock()
+            .unwrap()
+            .installs
+            .iter()
+            .filter(|v| v.get("urls").is_some() || v.get("url").is_some())
+            .cloned()
+            .collect()
+    }
+
     fn tasks(&self) -> std::collections::HashMap<i64, MockTask> {
         self.state.lock().unwrap().tasks.clone()
+    }
+
+    fn jobs(&self) -> Vec<MockJob> {
+        let mut jobs: Vec<MockJob> = self.state.lock().unwrap().jobs.values().cloned().collect();
+        jobs.sort_by_key(|j| j.id);
+        jobs
+    }
+
+    fn v2_op_posts(&self, op: &str) -> usize {
+        *self.state.lock().unwrap().v2_op_posts.get(op).unwrap_or(&0)
     }
 }
 
@@ -154,6 +223,252 @@ async fn find_task(
 }
 
 async fn ok_task(Json(_body): Json<Value>) -> Response {
+    Json(json!({"status": "success"})).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// v2 API (NextGen-class mock)
+// ---------------------------------------------------------------------------
+
+/// The fork's 404 body for unknown paths.
+fn not_found_text() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain")],
+        "Page not found",
+    )
+        .into_response()
+}
+
+async fn v2_system(State(state): State<Arc<Mutex<MockState>>>) -> Response {
+    let st = state.lock().unwrap();
+    if !st.v2 {
+        return not_found_text();
+    }
+    Json(json!({
+        "status": "success",
+        "data": {
+            "name": "Remote PKG Installer NextGen",
+            "version": "0.0.2-mock",
+            "title_id": "RPIN00001",
+            "ip": "127.0.0.1",
+            "port": 12800,
+            "network": true,
+            "storage": {"free": 274877906944u64, "total": 500107862016u64},
+            "active_jobs": st.jobs.len() as i64
+        }
+    }))
+    .into_response()
+}
+
+async fn v2_install(
+    State(state): State<Arc<Mutex<MockState>>>,
+    Json(body): Json<Value>,
+) -> Response {
+    {
+        let mut st = state.lock().unwrap();
+        st.installs.push(body.clone());
+        if !st.v2 {
+            return not_found_text();
+        }
+        if let Some(code) = st.fail_installs {
+            // v2 parameter/installer failures: HTTP 500 + error string.
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "fail", "error": format!("mock failure 0x{code:X}")})),
+            )
+                .into_response();
+        }
+    }
+    let urls: Vec<String> = body["urls"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .or_else(|| body["url"].as_str().map(|u| vec![u.to_string()]))
+        .unwrap_or_default();
+    if urls.is_empty() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "fail", "error": "Provide 'url', 'urls' or 'ref_pkg_url'."})),
+        )
+            .into_response();
+    }
+
+    // Prerequisite fetch, like the console-side installer performs.
+    let fetch_urls = state.lock().unwrap().fetch_urls;
+    let total = if fetch_urls {
+        match fetch_range_total(&urls[0]).await {
+            Some(t) => t,
+            None => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"status": "fail", "error": "prerequisite fetch failed"})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        10 * 1024 * 1024
+    };
+
+    let mut st = state.lock().unwrap();
+    let job_id = st.next_job_id;
+    st.next_job_id += 1;
+    if st.already_installed {
+        let title = "Mock Game".to_string();
+        st.jobs.insert(
+            job_id,
+            MockJob {
+                id: job_id,
+                task_id: -1,
+                state: "already_installed".into(),
+                total: 0,
+                transferred: 0,
+                title: title.clone(),
+                content_id: format!("CONTENT-ID-V2-{job_id}"),
+                paused: false,
+            },
+        );
+        return Json(json!({
+            "status": "success",
+            "data": {"job_id": job_id, "task_id": -1, "title": title,
+                     "content_id": format!("CONTENT-ID-V2-{job_id}"), "package_size": 0}
+        }))
+        .into_response();
+    }
+    let task_id = st.next_task_id;
+    st.next_task_id += 1;
+    let title = "Mock Game".to_string();
+    let content_id = format!("CONTENT-ID-{task_id}");
+    st.tasks.insert(
+        task_id,
+        MockTask {
+            total,
+            transferred: 0,
+            local_copy: 0,
+            error: 0,
+        },
+    );
+    st.by_content.insert(content_id.clone(), task_id);
+    st.jobs.insert(
+        job_id,
+        MockJob {
+            id: job_id,
+            task_id,
+            state: "running".into(),
+            total,
+            transferred: 0,
+            title: title.clone(),
+            content_id,
+            paused: false,
+        },
+    );
+    Json(json!({
+        "status": "success",
+        "data": {"job_id": job_id, "task_id": task_id, "title": title,
+                 "content_id": format!("CONTENT-ID-{task_id}"), "package_size": total}
+    }))
+    .into_response()
+}
+
+fn job_json(j: &MockJob) -> Value {
+    let percent = (j.transferred * 100)
+        .checked_div(j.total.max(1))
+        .unwrap_or(0)
+        .min(100) as i64;
+    json!({
+        "id": j.id,
+        "bgft_task_id": j.task_id,
+        "state": j.state,
+        "title": j.title,
+        "content_id": j.content_id,
+        "app_ver": "01.00",
+        "content_type": "PS4GD",
+        "pieces": 1,
+        "package_size": j.total,
+        "transferred": j.transferred,
+        "length_total": j.total,
+        "percent": percent,
+        "speed_bps": 11258991,
+        "is_patch": false,
+        "error": 0,
+        "rest_sec": 27,
+        "num_index": 0,
+        "num_total": 1
+    })
+}
+
+async fn v2_jobs(State(state): State<Arc<Mutex<MockState>>>) -> Response {
+    let mut st = state.lock().unwrap();
+    if !st.v2 {
+        return not_found_text();
+    }
+    // Advance running jobs, like the console's 1s taskman poll.
+    let step = st.step;
+    for job in st.jobs.values_mut() {
+        if job.state == "running" && !job.paused && job.transferred < job.total {
+            job.transferred = (job.transferred + step).min(job.total);
+            if job.transferred >= job.total {
+                job.state = "completed".into();
+            }
+        }
+    }
+    let jobs: Vec<Value> = st.jobs.values().map(job_json).collect();
+    Json(json!({"status": "success", "data": {"jobs": jobs}})).into_response()
+}
+
+/// Reproduces the NextGen routing quirk exactly: the POST router misses
+/// `/api/v2/jobs/<id>/<op>`, so POST answers 404 — only GET performs the op.
+async fn v2_op_post_404(
+    State(state): State<Arc<Mutex<MockState>>>,
+    Path((_id, op)): Path<(i64, String)>,
+) -> Response {
+    {
+        let mut st = state.lock().unwrap();
+        if !st.v2 {
+            return not_found_text();
+        }
+        *st.v2_op_posts.entry(op).or_insert(0) += 1;
+    }
+    not_found_text()
+}
+
+async fn v2_job_op(
+    State(state): State<Arc<Mutex<MockState>>>,
+    Path((id, op)): Path<(i64, String)>,
+) -> Response {
+    let mut st = state.lock().unwrap();
+    if !st.v2 {
+        return not_found_text();
+    }
+    let Some(job) = st.jobs.get_mut(&id) else {
+        return Json(json!({"status": "fail", "error_code": 0x80990019i64})).into_response();
+    };
+    match op.as_str() {
+        "pause" => {
+            job.paused = true;
+            job.state = "paused".into();
+        }
+        "resume" => {
+            job.paused = false;
+            if job.state == "paused" {
+                job.state = "running".into();
+            }
+        }
+        "stop" => {
+            job.state = "stopped".into();
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "fail", "error": "Unknown operation"})),
+            )
+                .into_response();
+        }
+    }
     Json(json!({"status": "success"})).into_response()
 }
 
@@ -435,6 +750,143 @@ async fn pause_resume_roundtrip() {
     client.resume_task(1).await.unwrap();
     client.stop_task(1).await.unwrap();
     client.unregister_task(1).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Client-level v2 API tests (NextGen-class mock)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn v2_probe_detects_nextgen_identity() {
+    let mock = MockConsole::start_v2().await;
+    let probe = client_for(mock.addr).probe().await.unwrap();
+    assert!(probe.caps.install_direct, "legacy probes must still pass");
+    assert!(probe.caps.api_v2, "v2 API must be detected");
+    let id = probe.identity.expect("identity present");
+    assert_eq!(id.name, "Remote PKG Installer NextGen");
+    assert_eq!(id.version, "0.0.2-mock");
+}
+
+#[tokio::test]
+async fn v2_probe_on_legacy_backend_reports_no_v2() {
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    let probe = client_for(mock.addr).probe().await.unwrap();
+    assert!(probe.caps.install_direct);
+    assert!(!probe.caps.api_v2, "legacy backend must not claim v2");
+    assert!(probe.identity.is_none());
+}
+
+/// Serve a small pkg file so the mock's prerequisite fetch succeeds; returns
+/// the temp dir, the file server (must stay alive for the whole test) and
+/// the URL.
+async fn serve_pkg_url() -> (
+    tempfile::TempDir,
+    rpi_ng_core::fileserver::FileServer,
+    String,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg_path = tmp.path().join("game.pkg");
+    std::fs::write(&pkg_path, vec![0u8; 256 * 1024]).unwrap();
+    let server = rpi_ng_core::fileserver::FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let id = server.register(pkg_path, Some("game.pkg".into()));
+    let url = server.url_for(id).unwrap();
+    (tmp, server, url)
+}
+
+#[tokio::test]
+async fn v2_install_and_jobs_roundtrip() {
+    let mock = MockConsole::start_v2().await;
+    let client = client_for(mock.addr);
+    let (_tmp, _server, url) = serve_pkg_url().await;
+
+    let resp = client.v2_install(&[url]).await.unwrap();
+    assert_eq!(resp.status, "success");
+    assert!(resp.task_id > 0);
+    let job_id = resp.job_id.expect("job id present");
+    assert!(job_id > 0);
+    assert_eq!(resp.title.as_deref(), Some("Mock Game"));
+
+    // The jobs list sees the job running, then completes through polls.
+    let mut completed = false;
+    for _ in 0..40 {
+        let jobs = client.v2_jobs().await.unwrap();
+        if let Some(job) = jobs.iter().find(|j| j.id == job_id) {
+            assert_eq!(job.bgft_task_id, resp.task_id);
+            if job.state == "completed" {
+                assert_eq!(job.transferred, job.length_total);
+                completed = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(completed, "v2 job should complete through polls");
+}
+
+#[tokio::test]
+async fn v2_job_op_falls_back_to_get_after_post_404() {
+    let mock = MockConsole::start_v2().await;
+    let client = client_for(mock.addr);
+    let (_tmp, _server, url) = serve_pkg_url().await;
+    let resp = client.v2_install(&[url]).await.unwrap();
+    let job_id = resp.job_id.unwrap();
+
+    // The mock 404s POST (the NextGen routing quirk); the client must fall
+    // back to GET and succeed.
+    client.v2_job_op(job_id, "pause").await.unwrap();
+    assert!(
+        mock.v2_op_posts("pause") >= 1,
+        "client must have tried POST first"
+    );
+    let jobs = client.v2_jobs().await.unwrap();
+    let job = jobs.iter().find(|j| j.id == job_id).unwrap();
+    assert_eq!(job.state, "paused");
+
+    client.v2_job_op(job_id, "resume").await.unwrap();
+    let jobs = client.v2_jobs().await.unwrap();
+    let job = jobs.iter().find(|j| j.id == job_id).unwrap();
+    // A small file may complete on the very next poll; "no longer paused"
+    // is the observable effect of the resume.
+    assert_ne!(job.state, "paused");
+
+    client.v2_job_op(job_id, "stop").await.unwrap();
+    let jobs = client.v2_jobs().await.unwrap();
+    let job = jobs.iter().find(|j| j.id == job_id).unwrap();
+    assert_eq!(job.state, "stopped");
+}
+
+#[tokio::test]
+async fn v2_install_failure_message_is_surfaced() {
+    let mock = MockConsole::start_v2().await;
+    mock.state.lock().unwrap().fail_installs = Some(0x8099_0007);
+    let client = client_for(mock.addr);
+    let err = client
+        .v2_install(&["http://127.0.0.1:1/x.pkg".into()])
+        .await
+        .unwrap_err();
+    match err {
+        RpiError::BackendError { code, gloss } => {
+            assert_eq!(code, 0);
+            assert!(
+                gloss.contains("mock failure"),
+                "error string must be surfaced, was: {gloss}"
+            );
+        }
+        other => panic!("expected BackendError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn v2_already_installed_reports_task_id_minus_one() {
+    let mock = MockConsole::start_v2().await;
+    mock.state.lock().unwrap().already_installed = true;
+    let client = client_for(mock.addr);
+    let (_tmp, _server, url) = serve_pkg_url().await;
+    let resp = client.v2_install(&[url]).await.unwrap();
+    assert_eq!(resp.task_id, -1, "-1 means already installed");
+    assert!(resp.job_id.is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,5 +1535,263 @@ async fn engine_install_without_task_id_is_unknown_not_failed() {
     assert!(item.error.as_deref().unwrap().contains("task id"));
     // The console did accept the request.
     assert_eq!(mock.installs().len(), 1);
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Engine end-to-end flow with the v2 API (NextGen-class mock)
+// ---------------------------------------------------------------------------
+
+/// Standard v2 harness: engine + v2 mock console + one valid fake PKG.
+/// Both temp dirs are returned: dropping them deletes the pkg file
+/// ("file vanished") and the queue persistence.
+#[allow(clippy::type_complexity)]
+async fn v2_engine_setup() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    MockConsole,
+    rpi_ng_core::engine::EngineHandle,
+) {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA08888_00-MOCKGAMEV200000.pkg",
+        "UP0001-CUSA08888_00-MOCKGAMEV200000",
+    );
+    let mock = MockConsole::start_v2().await;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+    handle.send(Command::Connect(mock.addr));
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    let target = snap.console.target.as_ref().expect("target");
+    assert!(target.caps.api_v2, "engine must know the backend speaks v2");
+    assert_eq!(
+        target.backend.as_ref().expect("identity").name,
+        "Remote PKG Installer NextGen"
+    );
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path.clone()],
+        recursive: false,
+    });
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.parts.iter().any(|p| p.pkg.is_some()))
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    (data_dir, pkg_dir, mock, handle)
+}
+
+#[tokio::test]
+async fn engine_v2_end_to_end_flow_completes_with_evidence() {
+    let (_data_dir, _pkg_dir, mock, handle) = v2_engine_setup().await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Completed),
+        Duration::from_secs(30),
+    )
+    .await;
+    let item = snap
+        .items
+        .iter()
+        .find(|i| i.state == ItemState::Completed)
+        .unwrap();
+    let progress = item.progress.unwrap();
+    assert_eq!(progress.total, 512 * 1024);
+    assert_eq!(progress.percent, 100.0);
+    assert_eq!(progress.raw_error, 0);
+    assert!(item.task_id.unwrap() > 0);
+    assert!(
+        item.job_id.unwrap() > 0,
+        "the console job id must be tracked"
+    );
+    assert_eq!(item.console_title.as_deref(), Some("Mock Game"));
+
+    // The install went through the v2 endpoint with a `url` body.
+    let v2_installs = mock.v2_installs();
+    assert_eq!(v2_installs.len(), 1, "exactly one v2 install request");
+    let url = v2_installs[0]["url"]
+        .as_str()
+        .expect("single-file url field");
+    assert!(url.starts_with("http://"), "URL was {url}");
+
+    // Progress came from the jobs list: the mock's job reached completed.
+    let jobs = mock.jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].state, "completed");
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn engine_v2_already_installed_completes_without_polling() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA09999_00-MOCKGAMEV2ALREADY.pkg",
+        "UP0001-CUSA09999_00-MOCKGAMEV2ALREADY",
+    );
+    let mock = MockConsole::start_v2().await;
+    mock.state.lock().unwrap().already_installed = true;
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.parts.iter().any(|p| p.pkg.is_some()))
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    handle.send(Command::Start);
+
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Completed),
+        Duration::from_secs(30),
+    )
+    .await;
+    let item = snap
+        .items
+        .iter()
+        .find(|i| i.state == ItemState::Completed)
+        .unwrap();
+    assert!(
+        item.task_id.is_none(),
+        "no console task for already-installed"
+    );
+    assert!(item.job_id.is_some());
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn engine_v2_pause_resume_uses_get_fallback() {
+    let (_data_dir, _pkg_dir, mock, handle) = v2_engine_setup().await;
+
+    handle.send(Command::Start);
+    // Wait until the item is transferring, then pause.
+    wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(30),
+    )
+    .await;
+    handle.send(Command::Pause);
+    wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Paused),
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        mock.v2_op_posts("pause") >= 1,
+        "pause must have gone POST-first (404) then GET"
+    );
+
+    handle.send(Command::Resume);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Completed),
+        Duration::from_secs(30),
+    )
+    .await;
+    let item = snap
+        .items
+        .iter()
+        .find(|i| i.state == ItemState::Completed)
+        .unwrap();
+    assert_eq!(item.progress.unwrap().percent, 100.0);
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn engine_v2_disconnect_reconnect_reconciles_via_jobs() {
+    let (_data_dir, _pkg_dir, mock, handle) = v2_engine_setup().await;
+
+    handle.send(Command::Start);
+    // Wait until transferring, then lose the connection.
+    wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(30),
+    )
+    .await;
+    handle.send(Command::Disconnect);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Unknown),
+        Duration::from_secs(10),
+    )
+    .await;
+    let item = &snap.items[0];
+    let job_id = item.job_id.expect("job id survives the disconnect");
+
+    // Reconnect: reconcile matches the item to the console's job by task id
+    // (or job id), re-attaches the poller, and the install finishes. Waiting
+    // directly for Completed proves the whole chain: match -> attach ->
+    // poll -> console-side completion.
+    handle.send(Command::Connect(mock.addr));
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.job_id == Some(job_id) && i.state == ItemState::Completed)
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+    let item = snap
+        .items
+        .iter()
+        .find(|i| i.job_id == Some(job_id))
+        .unwrap();
+    assert_eq!(item.state, ItemState::Completed);
+    assert_eq!(item.progress.unwrap().percent, 100.0);
+    // One v2 install, no resubmission after reconnect.
+    assert_eq!(mock.v2_installs().len(), 1);
     handle.shutdown();
 }

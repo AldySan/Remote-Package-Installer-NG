@@ -204,6 +204,7 @@ impl Queue {
                 state: ItemState::Queued,
                 error: None,
                 task_id: None,
+                job_id: None,
                 console_title: None,
                 progress: None,
                 attempts: 0,
