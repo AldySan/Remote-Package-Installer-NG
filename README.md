@@ -23,6 +23,11 @@ as work in progress.
 - If the app dies mid-install, it asks the console what actually happened
   instead of blindly re-sending anything
 - Windows, Linux and macOS — single binary, no runtime deps
+- If the console app is RPI NextGen, this app notices its v2 API on connect
+  and uses it: installs report content id and title right away, progress and
+  speed come from the console's own job list (one request per poll), and
+  pause/resume/cancel go through the job endpoints. Everything still works
+  with the plain old protocol otherwise
 
 ## What it doesn't do (yet)
 
@@ -36,9 +41,10 @@ as work in progress.
 ## What you need
 
 - A jailbroken PS4 running [GoldHEN](https://github.com/GoldHEN/GoldHEN)
-  (its built-in package installer speaks the same protocol) or flatz's
-  Remote Package Installer payload — keep it in the foreground, the PS4
-  suspends background apps
+  (its built-in package installer speaks the same protocol), flatz's
+  Remote Package Installer payload, or
+  [RPI NextGen](https://github.com/AldySan/ps4_remote_pkg_installer_nextgen)
+  — keep it in the foreground, the PS4 suspends background apps
 - Your own PKG files — this app just delivers them, it doesn't ship any
 - [Rust](https://rustup.rs) 1.95 or newer to build
 

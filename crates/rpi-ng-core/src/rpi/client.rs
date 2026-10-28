@@ -2,7 +2,7 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 
 use super::{json_fix, types::*};
 use crate::model::{BackendCaps, BackendKind, ProgressView};
@@ -15,6 +15,8 @@ pub enum RpiError {
     Timeout(Duration),
     #[error("connection refused (is the installer app running on the console?)")]
     ConnectionRefused,
+    #[error("backend answered HTTP {code}")]
+    Http { code: u16 },
     #[error("invalid response (not valid JSON): {0}")]
     InvalidJson(String),
     #[error("backend refused: {code} ({gloss})")]
@@ -38,6 +40,8 @@ impl RpiError {
 pub struct ProbeOutcome {
     pub kind: BackendKind,
     pub caps: BackendCaps,
+    /// Present when the backend speaks the v2 API (name/version/storage).
+    pub identity: Option<V2SystemData>,
 }
 
 /// HTTP client for the RPI dialect. Cheap to clone (the underlying
@@ -75,17 +79,30 @@ impl RpiClient {
         let resp = self.http.post(&url).json(body).send().await;
         let resp = match resp {
             Ok(r) => r,
-            Err(e) => {
-                if e.is_timeout() {
-                    return Err(RpiError::Timeout(self.timeout));
-                }
-                if e.is_connect() {
-                    return Err(RpiError::ConnectionRefused);
-                }
-                return Err(RpiError::Network(e.to_string()));
-            }
+            Err(e) => return Err(map_transport_err(e, self.timeout)),
         };
         let text = resp.text().await.unwrap_or_default();
+        self.parse_response(&text)
+    }
+
+    /// GET a JSON document, treating a non-success HTTP status as an error.
+    /// Legacy RPI backends answer unknown GET paths with 404 (+ HTML), so this
+    /// doubles as the v2-availability probe.
+    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, RpiError> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| map_transport_err(e, self.timeout))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(RpiError::Http {
+                code: status.as_u16(),
+            });
+        }
         self.parse_response(&text)
     }
 
@@ -99,9 +116,14 @@ impl RpiClient {
 
         if value.get("status").and_then(|s| s.as_str()) == Some("fail") {
             let code = lenient_i64_from_value(value.get("error_code"));
-            let gloss = explain_error_code(code)
-                .unwrap_or("no known translation")
-                .to_string();
+            // Some dialects (v2 install failures, parameter errors) carry a
+            // human-readable `error` string instead of / next to `error_code`.
+            let gloss = value
+                .get("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+                .or_else(|| explain_error_code(code).map(str::to_string))
+                .unwrap_or_else(|| "no known translation".into());
             return Err(RpiError::BackendError { code, gloss });
         }
         serde_json::from_value(value)
@@ -164,9 +186,21 @@ impl RpiClient {
             }
         }
 
+        // (4) v2 API — NextGen-class backends answer /api/v2/system with
+        // their identity. One extra GET against an already-verified backend.
+        let mut identity = None;
+        if caps.install_direct
+            && let Ok(sys) = self.v2_system().await
+            && !sys.name.is_empty()
+        {
+            caps.api_v2 = true;
+            identity = Some(sys);
+        }
+
         Ok(ProbeOutcome {
             kind: BackendKind::Rpi,
             caps,
+            identity,
         })
     }
 
@@ -185,10 +219,7 @@ impl RpiClient {
                 gloss: "install did not report success".into(),
             });
         }
-        if resp.task_id <= 0 {
-            // v3.x forks can omit task_id; treat as dialect variant.
-            return Err(RpiError::MissingTaskId);
-        }
+        check_task_id(&resp)?;
         Ok(resp)
     }
 
@@ -204,9 +235,7 @@ impl RpiClient {
                 gloss: "install did not report success".into(),
             });
         }
-        if resp.task_id <= 0 {
-            return Err(RpiError::MissingTaskId);
-        }
+        check_task_id(&resp)?;
         Ok(resp)
     }
 
@@ -268,6 +297,120 @@ impl RpiClient {
             sub_type,
         };
         self.post_json("/api/find_task", &req).await
+    }
+
+    // -- v2 API ------------------------------------------------------------
+
+    /// `GET /api/v2/system` — identity and storage of a v2 backend.
+    pub async fn v2_system(&self) -> Result<V2SystemData, RpiError> {
+        let resp: V2SystemResponse = self.get_json("/api/v2/system").await?;
+        Ok(resp.data)
+    }
+
+    /// `POST /api/v2/install` — `url` for single files, `urls` for multipart.
+    /// Maps the v2 response into the shared [`InstallResponse`] shape
+    /// (`job_id` filled, `task_id: -1` = already installed).
+    pub async fn v2_install(&self, package_urls: &[String]) -> Result<InstallResponse, RpiError> {
+        if package_urls.is_empty() {
+            return Err(RpiError::BackendError {
+                code: 0,
+                gloss: "no package urls to install".into(),
+            });
+        }
+        let req = if package_urls.len() == 1 {
+            V2InstallRequest {
+                url: Some(package_urls[0].clone()),
+                urls: None,
+            }
+        } else {
+            V2InstallRequest {
+                url: None,
+                urls: Some(package_urls.to_vec()),
+            }
+        };
+        let resp: V2InstallResponse = self.post_json("/api/v2/install", &req).await?;
+        if resp.status != "success" {
+            return Err(RpiError::BackendError {
+                code: 0,
+                gloss: "install did not report success".into(),
+            });
+        }
+        let d = resp.data;
+        let out = InstallResponse {
+            status: "success".into(),
+            task_id: d.task_id,
+            title: d.title,
+            job_id: Some(d.job_id),
+        };
+        check_task_id(&out)?;
+        Ok(out)
+    }
+
+    /// `GET /api/v2/jobs` — the console's whole job registry in one request.
+    pub async fn v2_jobs(&self) -> Result<Vec<V2Job>, RpiError> {
+        let resp: V2JobsResponse = self.get_json("/api/v2/jobs").await?;
+        Ok(resp.data.jobs)
+    }
+
+    /// `POST /api/v2/jobs/<id>/{pause|resume|stop}`.
+    ///
+    /// The API documents this as POST, but NextGen 0.0.1/0.0.2 only route the
+    /// operation under GET/HEAD — a POST answers 404. Try POST first (correct
+    /// for fixed builds and future versions), then fall back to GET once.
+    pub async fn v2_job_op(&self, job_id: i64, op: &str) -> Result<(), RpiError> {
+        let url = format!("{}/api/v2/jobs/{job_id}/{op}", self.base);
+        for attempt in 0..2 {
+            let req = if attempt == 0 {
+                self.http.post(&url)
+            } else {
+                self.http.get(&url)
+            };
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| map_transport_err(e, self.timeout))?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                let _: StatusAck = self.parse_response(&text)?;
+                return Ok(());
+            }
+            if attempt == 0 && status.as_u16() == 404 {
+                continue; // documented-POST / routed-GET mismatch: retry as GET
+            }
+            return Err(RpiError::Http {
+                code: status.as_u16(),
+            });
+        }
+        Err(RpiError::Http { code: 404 })
+    }
+}
+
+/// Acknowledgment body of lifecycle endpoints: `{"status":"success"}`.
+#[derive(Debug, Deserialize)]
+struct StatusAck {
+    #[allow(dead_code)]
+    status: String,
+}
+
+/// Install responses must carry a usable task id: `> 0` is a real BGFT task,
+/// `-1` means "already installed" (both dialects). Anything else (0, absent,
+/// or other negative sentinels from fork dialects) is untrackable.
+fn check_task_id(resp: &InstallResponse) -> Result<(), RpiError> {
+    if resp.task_id > 0 || resp.task_id == -1 {
+        Ok(())
+    } else {
+        Err(RpiError::MissingTaskId)
+    }
+}
+
+fn map_transport_err(e: reqwest::Error, timeout: Duration) -> RpiError {
+    if e.is_timeout() {
+        RpiError::Timeout(timeout)
+    } else if e.is_connect() {
+        RpiError::ConnectionRefused
+    } else {
+        RpiError::Network(e.to_string())
     }
 }
 

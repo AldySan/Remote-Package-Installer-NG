@@ -82,6 +82,9 @@ pub struct BackendCaps {
     pub status_endpoint: bool,
     /// `POST /api/find_task` available for reconciliation.
     pub find_task: bool,
+    /// `GET /api/v2/system` answered with an identity — the v2 job API is
+    /// available (install, jobs list, per-job lifecycle ops).
+    pub api_v2: bool,
 }
 
 impl Default for BackendCaps {
@@ -92,6 +95,7 @@ impl Default for BackendCaps {
             pause_resume: true,
             status_endpoint: false,
             find_task: true,
+            api_v2: false,
         }
     }
 }
@@ -112,6 +116,23 @@ pub enum ConsoleStatus {
     Lost,
 }
 
+/// Identity of a v2-capable backend, as reported by `GET /api/v2/system`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BackendIdentity {
+    pub name: String,
+    pub version: String,
+}
+
+impl fmt::Display for BackendIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.version.is_empty() {
+            write!(f, "{}", self.name)
+        } else {
+            write!(f, "{} {}", self.name, self.version)
+        }
+    }
+}
+
 /// The console the app talks to.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConsoleTarget {
@@ -121,6 +142,9 @@ pub struct ConsoleTarget {
     pub caps: BackendCaps,
     /// Best-effort friendly label (e.g. remembered alias).
     pub label: Option<String>,
+    /// v2 backend identity (name + version) when the backend provides one.
+    #[serde(default)]
+    pub backend: Option<BackendIdentity>,
 }
 
 /// A discovery result before it is promoted to a [`ConsoleTarget`].
@@ -265,6 +289,10 @@ pub struct QueueItem {
     pub error: Option<String>,
     /// Console-assigned task id once an install request succeeded.
     pub task_id: Option<TaskId>,
+    /// Console-assigned v2 job id (NextGen-class backends); used for the
+    /// per-job lifecycle endpoints instead of the task id.
+    #[serde(default)]
+    pub job_id: Option<i64>,
     /// Title echoed back by the console on install (when provided).
     pub console_title: Option<String>,
     pub progress: Option<ProgressView>,

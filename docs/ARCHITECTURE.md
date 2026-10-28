@@ -123,7 +123,9 @@ trait ConsoleBackend {
 ```
 
 One implementation ships today: `RpiBackend` speaking the flatz dialect
-(`docs/BASELINE.md §3`). Capability detection is **probing, never assumption**:
+(`docs/BASELINE.md §3`), plus an optional **v2 job API** layer for
+NextGen-class backends (see below). Capability detection is **probing, never
+assumption**:
 
 1. TCP connect (12800, then 9090 as GoldHEN-family fallback — pkg-sender's order).
 2. `GET /api` — the RPI server answers 400 with an "Unsupported method" body; anything
@@ -131,9 +133,33 @@ One implementation ships today: `RpiBackend` speaking the flatz dialect
 3. `GET /api/status` when it answers JSON (`{"busy":..}`) → richer capabilities
    (receiver-reported busy state); old receivers answer HTML → capability absent.
 4. `is_exists` probe validates the full request/response path before the first install.
+5. `GET /api/v2/system` — when it answers with an identity (`name`, `version`),
+   `api_v2` is set and the backend name/version are surfaced in the UI status chip.
 
 Unknown backends are shown as such; their unsupported operations are disabled in the
 UI rather than simulated.
+
+#### v2 job API (Remote PKG Installer NextGen)
+
+Verified against `AldySan/ps4_remote_pkg_installer_nextgen` (source review of
+`server.c` + `taskman.c` + `docs/API.md`). When `api_v2` is live, the engine
+prefers v2 endpoints; everything degrades to the legacy path when it is not:
+
+| Concern | Legacy path | v2 path |
+| --- | --- | --- |
+| Submit | `POST /api/install` | `POST /api/v2/install` (`url`/`urls`) → `job_id` + `task_id` |
+| Progress | per-task `POST /api/get_task_progress` | one `GET /api/v2/jobs` per poll tick, matched by `job_id`/`bgft_task_id` |
+| Pause/resume/stop | `POST /api/{pause,resume,stop}_task` | `POST /api/v2/jobs/<id>/{op}` with a **GET fallback on 404** (NextGen ≤ 0.0.2 only routes the op under GET — see AUDIT.md addendum) |
+| Reconnect reconcile | `find_task` per item + one progress probe | one `GET /api/v2/jobs`; terminal job states resolve `Unknown` items directly |
+
+Wire-behavior notes baked into the client: `task_id: -1` means already
+installed (both dialects); terminal v2 job states (`completed`,
+`already_installed`, `failed`, `stopped`) are console-side evidence; a job
+missing from the list means the console app restarted or reclaimed the slot —
+outcome genuinely unknown, never auto-resubmitted. Lifecycle endpoints are
+chosen by the *current* connection's capabilities, so an item that carries a
+v2 `job_id` still resumes correctly after reconnecting to a legacy-only
+backend.
 
 ### 4.3 Lenient JSON (the invalid-hex quirk)
 
