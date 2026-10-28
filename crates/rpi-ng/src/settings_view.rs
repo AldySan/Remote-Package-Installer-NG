@@ -6,7 +6,10 @@
 
 use eframe::egui;
 
-use rpi_ng_core::settings::{FailurePolicy, ThemeMode};
+use rpi_ng_core::{
+    fileserver::ServerCheck,
+    settings::{FailurePolicy, ThemeMode},
+};
 
 use crate::app::App;
 
@@ -16,12 +19,18 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
         *open = false;
         return;
     };
+    // Values the window body needs from `app` without fighting the draft
+    // borrow (the closure only captures `draft` + these copies).
+    let server_port = app.snapshot.server.as_ref().map(|s| s.bind.port());
+    let check_busy = app.server_checker.busy;
+    let check_result = app.server_check_result.clone();
     let mut save = false;
+    let mut kick_check: Option<u16> = None;
     egui::Window::new("Settings")
         .open(open)
         .collapsible(false)
         .resizable(false)
-        .min_width(420.0)
+        .min_width(460.0)
         .show(ctx, |ui| {
             egui::Grid::new("settings_grid")
                 .num_columns(2)
@@ -49,6 +58,52 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                             ui.add(egui::DragValue::new(port).range(1024..=65535).speed(1));
                         } else {
                             ui.label(egui::RichText::new("automatic").weak());
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("File server");
+                    ui.horizontal(|ui| {
+                        let label = if check_busy {
+                            "Checking…"
+                        } else {
+                            "Check File Server"
+                        };
+                        if ui
+                            .add_enabled(server_port.is_some(), egui::Button::new(label))
+                            .on_disabled_hover_text(
+                                "The file server starts when you connect to a console — \
+                                 connect first, then check",
+                            )
+                            .on_hover_text(
+                                "Test whether the app's own file server is answering on this \
+                                 computer — if it is OK but the console still cannot download, the \
+                                 block is between the two machines (firewall / network)",
+                            )
+                            .clicked()
+                        {
+                            kick_check = server_port;
+                        }
+                        if check_busy {
+                            ui.add(egui::Spinner::new());
+                        } else if let Some(result) = &check_result {
+                            match result {
+                                ServerCheck::Responded(code) => ui.colored_label(
+                                    egui::Color32::from_rgb(34, 197, 94),
+                                    format!("OK (HTTP {code})"),
+                                ),
+                                ServerCheck::NotRunning => {
+                                    ui.colored_label(egui::Color32::GRAY, "not running")
+                                }
+                                ServerCheck::NoAnswer => ui.colored_label(
+                                    egui::Color32::from_rgb(245, 158, 11),
+                                    "no answer",
+                                ),
+                                ServerCheck::Error(_) => ui.colored_label(
+                                    egui::Color32::from_rgb(239, 68, 68),
+                                    "check failed",
+                                ),
+                            };
                         }
                     });
                     ui.end_row();
@@ -121,20 +176,31 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                 if ui.button("Save").clicked() {
                     save = true;
                 }
-                ui.label(
-                    egui::RichText::new(
-                        "The file-server port applies the next time you connect. The update \
-                         check only asks GitHub for the latest release tag — nothing else \
-                         is sent.",
-                    )
-                    .small()
-                    .weak(),
-                );
             });
+
+            // Footnotes: full width, regular size, quiet color — visible when
+            // you look for them, silent when you don't. (v0.0.2 had these
+            // crammed next to Save in `.small()`, which users couldn't read.)
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new("The file-server port applies the next time you connect.")
+                    .weak(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "The update check only asks GitHub for the latest release tag — \
+                     nothing else is sent.",
+                )
+                .weak(),
+            );
         });
     if save && let Some(draft) = app.settings_draft.clone() {
         app.settings = draft.clone();
         app.send(rpi_ng_core::Command::SetSettings(Box::new(draft)));
+    }
+    if let Some(port) = kick_check {
+        app.server_checker.kick(port);
     }
 }
 

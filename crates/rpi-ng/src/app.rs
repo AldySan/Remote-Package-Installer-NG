@@ -6,12 +6,16 @@ use eframe::egui;
 
 use rpi_ng_core::{
     Command, EngineHandle,
+    fileserver::ServerCheck,
     model::{ConsoleCandidate, ConsoleStatus, Event, ItemState, LogLevel, QueueItem, Snapshot},
     settings::{Settings, ThemeMode},
     update::UpdateInfo,
 };
 
-use crate::{connect_view, dialogs, log_view, queue_view, settings_view, updater::Updater};
+use crate::{
+    connect_view, dialogs, log_view, queue_view, servercheck::ServerChecker, settings_view,
+    updater::Updater,
+};
 
 const MAX_LOG_LINES: usize = 500;
 
@@ -46,6 +50,10 @@ pub struct App {
     updater: Updater,
     update_status: UpdateStatus,
     show_update_window: bool,
+    /// File-server self-check ("Check File Server" button).
+    pub(crate) server_checker: ServerChecker,
+    /// Outcome of the most recent self-check, shown as a status chip.
+    pub(crate) server_check_result: Option<rpi_ng_core::fileserver::ServerCheck>,
     pub(crate) dialog: Option<dialogs::DialogPick>,
     /// Folder awaiting a recursive/flat choice.
     pub(crate) pending_folder: Option<PathBuf>,
@@ -55,6 +63,9 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        // Resolve/create/migrate the data dir BEFORE loading anything, so a
+        // first run on an upgraded install picks up the old files.
+        let data_dir = rpi_ng_core::settings::init_data_dir();
         let settings = Settings::load();
         let auto_discovery = settings.discovery_enabled;
         let auto_update_check = settings.auto_check_updates;
@@ -69,12 +80,24 @@ impl App {
             updater.kick();
             update_status = UpdateStatus::Checking;
         }
+        // First log line: where the config lives, so users can find (and
+        // back up) their settings — the app is portable, they travel with
+        // the executable's folder.
+        let mut logs = VecDeque::new();
+        let location = match &data_dir {
+            Some(dir) => format!("Settings and the queue are stored in {}", dir.display()),
+            None => {
+                "Settings storage could not be resolved — changes will not".to_string()
+                    + " persist across restarts"
+            }
+        };
+        logs.push_back((rpi_ng_core::model::unix_ms(), LogLevel::Info, location));
         Self {
             engine: Some(engine),
             settings,
             settings_draft: None,
             snapshot: Snapshot::default(),
-            logs: VecDeque::new(),
+            logs,
             discovered: Vec::new(),
             discovery_running: auto_discovery,
             manual_addr: String::new(),
@@ -85,6 +108,8 @@ impl App {
             updater,
             update_status,
             show_update_window: false,
+            server_checker: ServerChecker::new(),
+            server_check_result: None,
             dialog: None,
             pending_folder: None,
             force_connect_view: false,
@@ -266,6 +291,47 @@ impl App {
         }
     }
 
+    /// Poll the file-server self-check channel, fold the result into the UI
+    /// state and log an actionable line — the whole point of the button is
+    /// that the outcome explains *where* the problem likely is.
+    fn poll_server_check(&mut self) {
+        let Some(result) = self.server_checker.poll() else {
+            return;
+        };
+        let (level, msg) = match &result {
+            ServerCheck::Responded(code) => (
+                LogLevel::Info,
+                format!(
+                    "File server self-check: answering normally (HTTP {code}). If the console \
+                     still cannot download, the block is between the two machines — check the \
+                     firewall allows this app on the local network."
+                ),
+            ),
+            ServerCheck::NotRunning => (
+                LogLevel::Warn,
+                "File server self-check: not running — it starts together with a console \
+                 connection."
+                    .to_string(),
+            ),
+            ServerCheck::NoAnswer => (
+                LogLevel::Warn,
+                "File server self-check: no answer within the timeout — a firewall or \
+                 antivirus may be intercepting the connection."
+                    .to_string(),
+            ),
+            ServerCheck::Error(e) => (
+                LogLevel::Warn,
+                format!("File server self-check failed: {e}"),
+            ),
+        };
+        self.logs
+            .push_back((rpi_ng_core::model::unix_ms(), level, msg));
+        while self.logs.len() > MAX_LOG_LINES {
+            self.logs.pop_front();
+        }
+        self.server_check_result = Some(result);
+    }
+
     fn update_controls(&mut self, ui: &mut egui::Ui) {
         match self.update_status.clone() {
             UpdateStatus::Checking => {
@@ -383,6 +449,7 @@ impl eframe::App for App {
         self.apply_theme(ui.ctx());
         let busy = self.poll_engine();
         self.poll_update();
+        self.poll_server_check();
         self.poll_dialog();
         self.poll_dropped_files(ui.ctx());
         self.folder_choice(ui.ctx());
@@ -461,14 +528,18 @@ impl eframe::App for App {
         }
 
         // Repaint cadence: only while something is actually happening —
-        // an idle queue costs zero CPU (no busy redraw loop).
+        // an idle queue costs zero CPU (no busy redraw loop). While the
+        // file server is up the engine emits a snapshot every 250 ms, and
+        // the live in/out rates below the toolbar need that repaint.
         let active = busy
             || self.snapshot.engine_busy
             || self.discovery_running
             || matches!(self.snapshot.console.status, ConsoleStatus::Probing)
             || self.dialog.is_some()
             || self.pending_folder.is_some()
-            || self.updater.busy;
+            || self.updater.busy
+            || self.server_checker.busy
+            || self.snapshot.server.is_some();
         if active {
             ui.ctx().request_repaint_after(Duration::from_millis(150));
         }
