@@ -1,0 +1,5 @@
+# Statically link the C runtime on Windows so the binary runs on machines
+# without the Visual C++ redistributable installed ("VCRUNTIME140.dll was not
+# found"). See docs/BUILDING.md for the full release-profile story.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
