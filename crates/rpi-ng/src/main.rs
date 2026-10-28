@@ -9,6 +9,7 @@ mod dialogs;
 mod fmt;
 mod log_view;
 mod queue_view;
+mod servercheck;
 mod settings_view;
 mod updater;
 

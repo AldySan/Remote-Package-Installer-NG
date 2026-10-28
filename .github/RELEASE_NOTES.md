@@ -1,21 +1,22 @@
-# Remote Package Installer NG v0.0.2
+# Remote Package Installer NG v0.0.3
 
 A small update to the free desktop app that installs PS4 game files (`.pkg`) over your home network — no USB stick, no FTP.
 
 ## What's new
 
-- **If an install fails, you decide what happens next**: keep sending the rest of the queue, or pause everything until you take a look. Set it in *Settings* (default: keep going, same as before).
-- **The app can now check for updates by itself** — on startup and via the "Check for updates" button. It only asks GitHub what the latest version is; nothing else is ever sent. You can turn it off in *Settings*.
-- **More package info while transferring**: the queue now also shows the game's version (App Ver) next to the title, with progress, speed and remaining time.
-- Fixes from the first release: changing settings (like the theme) now actually applies and saves, and the app no longer opens a CMD window on Windows.
+- **Settings now actually stick.** This release fixes a bug where everything you saved (theme, port, queue options) looked fine but silently vanished on the next launch. Sorry about that — and thanks for the report.
+- **Your config lives next to the program.** Settings and the queue are now stored as small JSON files in the same folder as the app itself (e.g. `D:\RPING\`), so the whole folder stays self-contained and portable. The activity log shows the exact location on every start.
+- **See your transfer activity live.** While connected, a file-server line under the toolbar shows the live speeds — megabits per second out to the console and back in — plus the totals for the session.
+- **New "Check File Server" button** (also in Settings): a one-click self-test of the app's own server. If it answers OK but your PS4 still can't download, you know the problem sits between the two machines — firewall or network — not in the app.
+- **Readability fixes:** the troubleshooting text on the connect screen and the small print in Settings are now regular size, and the notes moved below the buttons where they have room to breathe.
 
 ## Downloads
 
 Pick the file for your computer:
 
-- **Windows** — `RemotePackageInstallerNG-v0.0.2-Windows-x64.zip`
-- **Mac** — `RemotePackageInstallerNG-v0.0.2-macos-universal.tar.gz` (works on every Mac)
-- **Linux** — `RemotePackageInstallerNG-v0.0.2-Linux-x64.tar.gz`
+- **Windows** — `RemotePackageInstallerNG-v0.0.3-Windows-x64.zip`
+- **Mac** — `RemotePackageInstallerNG-v0.0.3-macos-universal.tar.gz` (works on every Mac)
+- **Linux** — `RemotePackageInstallerNG-v0.0.3-Linux-x64.tar.gz`
 
 First-run notes:
 

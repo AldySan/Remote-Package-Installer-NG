@@ -40,6 +40,8 @@ You can line up as many files as you like — they install one by one, in order,
 
 - The app **does not come with games** and does not download anything. You bring your own `.pkg` files — it just delivers them to the console.
 - The app **checks GitHub for a newer release** on startup (and when you press *Check for updates*). That request carries nothing but the app's name and version — no accounts, no identifiers — and you can turn it off in *Settings*.
+- **It's portable:** your settings and queue are stored as small JSON files **next to the program itself** (same folder as the executable), so everything travels together — copy the folder, and your setup comes with it. The activity log tells you the exact location on every start.
+- While you're connected, the app shows a live **file-server line** with the in/out transfer rates (Mbps), the totals for the session and a **Check File Server** button — a one-click self-test that tells you whether the app's own server is fine or whether something between the two machines (firewall, network) is the problem.
 - Installing happens through the console's own installer. The app doesn't modify or "hack" your PS4.
 - **PS4 only.** PS5 is not supported.
 

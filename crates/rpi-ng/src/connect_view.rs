@@ -180,18 +180,22 @@ fn troubleshooting(ui: &mut egui::Ui) {
     egui::CollapsingHeader::new("Nothing found? Troubleshooting")
         .default_open(false)
         .show(ui, |ui| {
-            ui.small(
-                "• Check that the PS4 and this computer are on the same network (no guest/AP \
-                 isolation).\n\
-                 • On the PS4, start the Remote Package Installer app and keep it in the \
-                 foreground — the PS4 suspends background apps.\n\
-                 • GoldHEN users: start the installer from the GoldHEN menu, or note that \
-                 some setups use port 9090 instead of 12800 — try 192.168.1.42:9090.\n\
-                 • Verify the console IP in Settings → Network → View Connection Status.\n\
-                 • Firewalls: this app serves files from your computer to the console; allow \
-                 it on the local network when prompted.\n\
-                 • Large subnets: the scan covers a bounded number of addresses — use the \
-                 manual address for unusual networks.",
+            // Regular size (v0.0.2 used ui.small() — unreadably tiny).
+            ui.label(
+                egui::RichText::new(
+                    "• Check that the PS4 and this computer are on the same network (no \
+                     guest/AP isolation).\n\
+                     • On the PS4, start the Remote Package Installer app and keep it in the \
+                     foreground — the PS4 suspends background apps.\n\
+                     • GoldHEN users: start the installer from the GoldHEN menu, or note that \
+                     some setups use port 9090 instead of 12800 — try 192.168.1.42:9090.\n\
+                     • Verify the console IP in Settings → Network → View Connection Status.\n\
+                     • Firewalls: this app serves files from your computer to the console; allow \
+                     it on the local network when prompted.\n\
+                     • Large subnets: the scan covers a bounded number of addresses — use the \
+                     manual address for unusual networks.",
+                )
+                .weak(),
             );
         });
 }

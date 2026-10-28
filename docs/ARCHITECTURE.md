@@ -297,6 +297,17 @@ load (fall back to backup copy, then defaults):
   every transition (debounced 250 ms during storms), always fsynced on
   `unknown`-marking transitions before exit.
 
+**Data dir resolution** (`settings::data_dir`): `RPI_NG_DATA_DIR` env override →
+**the executable's own directory** (the app ships as a portable archive, so the config
+travels with it: `D:\RPING\` stays self-contained) → per-OS user data dir as a last-resort
+fallback. `settings::init_data_dir` (called once at startup, before any load) creates the
+dir and performs a one-time migration of pre-portable files from the old user-data
+location — existing files are never overwritten, and the migration never runs under an
+env override so tests stay hermetic. The first activity-log line reports the resolved
+location. `engine::spawn_with` resolves `None` through the same path (v0.0.2 passed
+`None` straight through, which silently disabled *all* persistence — see
+`docs/AUDIT.md` §8.1).
+
 ## 5. PS5 extension points (design now, build later)
 
 - `ConsoleBackend` implementations are per-generation; PS5 gets `EtaHenDpiBackend`

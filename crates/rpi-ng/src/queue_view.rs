@@ -2,7 +2,10 @@
 
 use eframe::egui;
 
-use rpi_ng_core::model::{ItemState, ProgressView, QueueItem};
+use rpi_ng_core::{
+    fileserver::ServerCheck,
+    model::{ItemState, ProgressView, QueueItem},
+};
 
 use crate::{
     app::{App, queue_summary, state_color},
@@ -13,6 +16,7 @@ const ROW_HEIGHT: f32 = 74.0;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toolbar(app, ui);
+    server_strip(app, ui);
     ui.add_space(4.0);
 
     // Filter to row indices once per frame: no QueueItem clones, and the
@@ -28,7 +32,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .collect();
 
     if indices.is_empty() {
-        empty_state(app, ui);
+        empty_state(ui);
         return;
     }
 
@@ -134,7 +138,93 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn empty_state(app: &mut App, ui: &mut egui::Ui) {
+/// Live file-server line: where packages are served from, live in/out
+/// transfer rates, totals and the self-check button. Visible whenever the
+/// server runs (i.e. while a console session is up) — the natural home for
+/// "is the pipe actually working?" questions.
+fn server_strip(app: &mut App, ui: &mut egui::Ui) {
+    let Some(server) = app.snapshot.server.clone() else {
+        return;
+    };
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.colored_label(egui::Color32::from_rgb(34, 197, 94), "●");
+        ui.strong("File server");
+        ui.monospace(&server.base_url);
+        ui.separator();
+        ui.colored_label(
+            egui::Color32::from_rgb(34, 197, 94),
+            format!("↑ {}", fmt::mbps(server.tx_bps)),
+        )
+        .on_hover_text("Out — what the console is downloading from you (smoothed)");
+        ui.colored_label(
+            egui::Color32::from_rgb(96, 165, 250),
+            format!("↓ {}", fmt::mbps(server.rx_bps)),
+        )
+        .on_hover_text("In — request/control traffic (tiny by design)");
+        let totals = format!(
+            "sent {} · received {}",
+            fmt::bytes(server.tx_total),
+            fmt::bytes(server.rx_total)
+        );
+
+        // Right side: self-check button + outcome chip + session totals.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let busy = app.server_checker.busy;
+            let label = if busy {
+                "Checking…"
+            } else {
+                "Check File Server"
+            };
+            if ui
+                .button(label)
+                .on_hover_text(
+                    "Test whether the app's own file server is answering on this \
+                     computer — if it is OK but the console still cannot download, the \
+                     block is between the two machines (firewall / network)",
+                )
+                .clicked()
+            {
+                app.server_checker.kick(server.bind.port());
+            }
+            if busy {
+                ui.add(egui::Spinner::new());
+            } else if let Some(result) = app.server_check_result.clone() {
+                check_chip(ui, &result);
+            }
+            ui.label(egui::RichText::new(totals).weak());
+        });
+    });
+}
+
+/// Compact outcome chip for the most recent self-check.
+fn check_chip(ui: &mut egui::Ui, result: &ServerCheck) {
+    match result {
+        ServerCheck::Responded(code) => {
+            ui.colored_label(
+                egui::Color32::from_rgb(34, 197, 94),
+                format!("OK (HTTP {code})"),
+            )
+            .on_hover_text("The server answered the probe — it is running normally");
+        }
+        ServerCheck::NotRunning => {
+            ui.colored_label(egui::Color32::GRAY, "not running")
+                .on_hover_text(
+                    "Nothing is listening — the server starts with a console connection",
+                );
+        }
+        ServerCheck::NoAnswer => {
+            ui.colored_label(egui::Color32::from_rgb(245, 158, 11), "no answer")
+                .on_hover_text("The port accepted the connection but never replied — a firewall or antivirus may be intercepting it");
+        }
+        ServerCheck::Error(e) => {
+            ui.colored_label(egui::Color32::from_rgb(239, 68, 68), "check failed")
+                .on_hover_text(format!("Unexpected I/O error: {e}"));
+        }
+    }
+}
+
+fn empty_state(ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
         .fill(ui.style().visuals.faint_bg_color)
         .inner_margin(egui::Margin::same(28))
@@ -145,17 +235,8 @@ fn empty_state(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(20.0);
             ui.heading("Drop PKG files here");
             ui.label(egui::RichText::new("…or use “Add PKG files…” / “Add folder…” above.").weak());
-            ui.add_space(12.0);
-            if let Some(server) = &app.snapshot.server {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "The console will download from {}",
-                        server.base_url
-                    ))
-                    .small()
-                    .weak(),
-                );
-            }
+            // The live file-server strip above the list already shows the
+            // serving URL — no need to repeat it here.
             ui.add_space(20.0);
         });
     });
