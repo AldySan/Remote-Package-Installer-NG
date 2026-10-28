@@ -446,6 +446,8 @@ impl EngineInner {
                 if let Err(e) = result {
                     self.log(LogLevel::Error, format!("settings save failed: {e}"));
                 }
+                // Echo back so the UI's cached copy stays in sync.
+                let _ = self.evt.send(Event::SettingsChanged(self.settings()));
             }
             Command::Shutdown => unreachable!("handled by the supervisor loop"),
         }
@@ -1332,14 +1334,20 @@ impl EngineInner {
     // -- connection lifecycle ----------------------------------------------------
 
     fn remember_console(&mut self, addr: SocketAddr) {
-        let mut s = self.settings.lock().unwrap();
-        s.remembered.retain(|r| r.addr != addr);
-        s.remembered
-            .insert(0, RememberedConsole { addr, label: None });
-        if s.remembered.len() > 8 {
-            s.remembered.truncate(8);
-        }
-        let _ = s.save_in(self.data_dir.as_deref());
+        let snapshot = {
+            let mut s = self.settings.lock().unwrap();
+            s.remembered.retain(|r| r.addr != addr);
+            s.remembered
+                .insert(0, RememberedConsole { addr, label: None });
+            if s.remembered.len() > 8 {
+                s.remembered.truncate(8);
+            }
+            let _ = s.save_in(self.data_dir.as_deref());
+            s.clone()
+        };
+        // The UI keeps a cached copy of the settings; broadcast the new
+        // remembered-console list so it never goes stale.
+        let _ = self.evt.send(Event::SettingsChanged(snapshot));
     }
 
     /// Start (or restart) the file server on an interface that can reach the
