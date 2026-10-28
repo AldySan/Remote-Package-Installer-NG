@@ -271,3 +271,63 @@ the console for `cargo run` output.
   reasoning + manual testing; the engine-side semantics are covered by the
   new regression test. No UI automation framework was added — egui_kittest
   would be a new dependency for two lines of logic, which is not worth it.
+
+## 7. Addendum — queue failure policy & update checker (v0.0.2)
+
+### 7.1 Queue behavior on failure was hardcoded (feature request)
+
+Before: a failed item (console error or rejected submit) always advanced the
+queue to the next package. Users asked for the choice: park the queue so the
+failure gets attention, or keep going.
+
+**Design:** new `Settings::on_failure` (`FailurePolicy::Continue | Pause`,
+default `Continue` = the previous behavior, no silent semantic change). All
+three failure sites route through one new engine method
+(`on_transfer_failure`): submit-failure after exhausting retries, legacy
+progress polls reporting `error != 0`, and v2 jobs reaching `failed`.
+`Pause` sets `running = false` and logs an actionable Warn — the remaining
+items stay `Queued` until the user presses *Start queue*.
+
+**Retry now means "process now":** `Command::Retry` sets `running = true`.
+Previously a retry after a pause left the item `Queued` until something else
+restarted the queue — surprising under the new policy, where Retry is the
+primary recovery path.
+
+**Deliberately unchanged:** locally-invalid items (vanished/broken files) are
+still skipped during queue start — that is pre-transfer validation, not a
+transfer failure, and "skip known-bad files" is the useful behavior in both
+policies. Reconnect-reconcile failures don't auto-advance either way (the
+queue is not running at that point).
+
+Regression tests: `engine_failure_policy_pauses_queue_until_retry` (also
+proves Retry restarts), `engine_failure_policy_continue_advances_queue`,
+`engine_failure_policy_pauses_after_console_error_mid_transfer`,
+`engine_failure_policy_pauses_after_v2_job_failure`.
+
+### 7.2 Update checker
+
+One GET to `https://api.github.com/repos/…/releases/latest`, no identifiers
+sent beyond the User-Agent. Version comparison (`update::is_newer`) is
+strictly numeric with pre-release ranking and **fails closed**: any tag that
+does not parse cleanly is treated as "not newer", so a malformed upstream tag
+can never nag users. 404 from the API (repo without releases) is `Ok(None)`,
+not an error; 403/429 classify as a rate limit with a human message.
+
+**TLS:** reqwest gained the `rustls` feature (aws-lc-rs + platform verifier
+— static, no OpenSSL runtime dependency). aws-lc needs NASM on Windows x64;
+instead of requiring it, `.cargo/config.toml` sets
+`AWS_LC_SYS_PREBUILT_NASM=1` (no effect on Linux/macOS; if NASM *is*
+installed it is used normally).
+
+**UI:** background thread with its own tokio runtime reports through a
+channel polled once per frame (the GUI thread never blocks). Startup
+auto-check (on by default, Settings) only pops the window when an update
+exists; the manual button always shows the outcome. Every result is logged
+to the activity panel.
+
+**Verification:** `tests/update_test.rs` mocks the GitHub API end to end
+(newer/same/older, 404, rate-limit, malformed body, empty tag, missing
+`html_url` fallback, unreachable network); version comparison has unit tests
+covering padding (`0.1` vs `0.1.0`), `v` prefixes, pre-releases and garbage.
+A bug caught during review: the initial comparison was inverted
+(`cur > new`) — the test suite flagged it immediately.

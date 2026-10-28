@@ -25,7 +25,7 @@ No accounts, no console-side setup, and nothing ever leaves your own network.
 4. Add your `.pkg` files (one or many, whole folders too) and press **Start**.
 5. When the app says an item is **Done**, the game appears on your PS4's home screen.
 
-You can line up as many files as you like, watch speed and remaining time while they install, and pause or cancel any of them. If the app or the console gets interrupted, it checks with the PS4 what actually finished instead of blindly sending everything again.
+You can line up as many files as you like — they install one by one, in order, with speed and remaining time shown for each. Pause or cancel any of them. If a transfer fails, you choose what happens: continue with the rest or pause the queue (in *Settings*). If the app or the console gets interrupted, it checks with the PS4 what actually finished instead of blindly sending everything again.
 
 ## Common problems
 
@@ -39,6 +39,7 @@ You can line up as many files as you like, watch speed and remaining time while 
 ## Good to know
 
 - The app **does not come with games** and does not download anything. You bring your own `.pkg` files — it just delivers them to the console.
+- The app **checks GitHub for a newer release** on startup (and when you press *Check for updates*). That request carries nothing but the app's name and version — no accounts, no identifiers — and you can turn it off in *Settings*.
 - Installing happens through the console's own installer. The app doesn't modify or "hack" your PS4.
 - **PS4 only.** PS5 is not supported.
 
