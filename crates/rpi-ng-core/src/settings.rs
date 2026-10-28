@@ -150,15 +150,77 @@ impl From<SettingsDoc> for Settings {
     }
 }
 
-/// Where settings/queue documents live (per-OS user data dir).
-/// Overridable with `RPI_NG_DATA_DIR` (used by tests and headless runs).
+/// Files we persist in the data dir (migrated from the legacy location on
+/// first run of a newer build).
+const PERSISTED_FILES: [&str; 2] = ["settings.json", "queue.json"];
+
+/// Where settings/queue documents live.
+///
+/// Resolution order:
+/// 1. `RPI_NG_DATA_DIR` env var (tests, headless embedding);
+/// 2. **the directory of the executable** — the app is portable, so the
+///    config travels with it (e.g. `D:\\RPING\\rpi-ng.exe` → `D:\\RPING\\`);
+/// 3. per-OS user data dir (fallback when the exe path cannot be determined).
 pub fn data_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("RPI_NG_DATA_DIR")
-        && !dir.is_empty()
-    {
+    resolve_data_dir(
+        std::env::var("RPI_NG_DATA_DIR").ok().as_deref(),
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
+/// Pure resolution logic (parameterized for tests). An empty env value is
+/// treated as unset — same contract as the real `RPI_NG_DATA_DIR` handling.
+fn resolve_data_dir(env: Option<&str>, exe: Option<&std::path::Path>) -> Option<PathBuf> {
+    if let Some(dir) = env.filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(dir));
     }
+    if let Some(exe) = exe
+        && let Some(parent) = exe.parent()
+        // Guard against the degenerate `parent() == ""` some launchers report.
+        && !parent.as_os_str().is_empty()
+    {
+        return Some(parent.to_path_buf());
+    }
+    legacy_data_dir()
+}
+
+/// The pre-portable location (per-OS user data dir). Kept only so an existing
+/// install can be migrated — see [`init_data_dir`].
+pub fn legacy_data_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "rpi-ng").map(|d| d.data_dir().to_path_buf())
+}
+
+/// Resolve the data dir, create it, and migrate any pre-portable files into
+/// it (once: files already present are never overwritten). Called at startup,
+/// before anything reads or writes the data dir.
+///
+/// The legacy migration only runs under the *default* resolution — an
+/// `RPI_NG_DATA_DIR` override (tests, headless embedding) stays hermetic and
+/// never reads the host user's real files.
+pub fn init_data_dir() -> Option<PathBuf> {
+    let env = std::env::var("RPI_NG_DATA_DIR")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let dir = resolve_data_dir(env.as_deref(), std::env::current_exe().ok().as_deref())?;
+    if std::fs::create_dir_all(&dir).is_err() {
+        // Read-only location (e.g. Program Files without elevation): keep the
+        // dir anyway — reads still work, and any later write failure is
+        // surfaced by the engine ("settings save failed: …") with the path.
+    }
+    if env.is_none()
+        && let Some(legacy) = legacy_data_dir()
+        && legacy != dir
+    {
+        for file in PERSISTED_FILES {
+            let from = legacy.join(file);
+            let to = dir.join(file);
+            if !to.exists() && from.is_file() {
+                // Best effort: a failed copy just means we start fresh.
+                let _ = std::fs::copy(&from, &to);
+            }
+        }
+    }
+    Some(dir)
 }
 
 impl Settings {
@@ -212,4 +274,81 @@ pub fn atomic_write(tmp: &PathBuf, dest: &PathBuf, bytes: &[u8]) -> std::io::Res
         f.sync_all()?;
     }
     std::fs::rename(tmp, dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_override_wins_over_exe_dir() {
+        let dir = resolve_data_dir(
+            Some("/tmp/data"),
+            Some(std::path::Path::new("/opt/app/rpi-ng.exe")),
+        );
+        assert_eq!(dir, Some(PathBuf::from("/tmp/data")));
+    }
+
+    #[test]
+    fn exe_dir_is_used_when_no_env() {
+        let exe = if cfg!(windows) {
+            std::path::Path::new("D:\\RPING\\rpi-ng.exe")
+        } else {
+            std::path::Path::new("/home/user/RPING/rpi-ng")
+        };
+        let dir = resolve_data_dir(None, Some(exe));
+        assert_eq!(dir, Some(exe.parent().unwrap().to_path_buf()));
+    }
+
+    #[test]
+    fn empty_env_is_ignored() {
+        let dir = resolve_data_dir(Some(""), Some(std::path::Path::new("/opt/app/rpi-ng")));
+        assert_eq!(dir, Some(PathBuf::from("/opt/app")));
+    }
+
+    #[test]
+    fn falls_back_to_user_dir_without_exe() {
+        // No env, no exe path: still resolves to the per-OS user dir.
+        assert!(resolve_data_dir(None, None).is_some());
+    }
+
+    #[test]
+    fn init_migrates_legacy_files_once() {
+        let new_dir = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("settings.json"), "{\"theme\":\"Dark\"}").unwrap();
+        std::fs::write(legacy.path().join("queue.json"), "{\"items\":[]}").unwrap();
+
+        migrate(legacy.path(), new_dir.path());
+        // Both files copied.
+        assert!(new_dir.path().join("settings.json").is_file());
+        assert!(new_dir.path().join("queue.json").is_file());
+        // And loaded correctly.
+        let s = Settings::load_in(Some(new_dir.path()));
+        assert_eq!(s.theme, ThemeMode::Dark);
+
+        // Second run: existing files are never overwritten.
+        std::fs::write(
+            new_dir.path().join("settings.json"),
+            "{\"theme\":\"Light\"}",
+        )
+        .unwrap();
+        migrate(legacy.path(), new_dir.path());
+        assert_eq!(
+            std::fs::read_to_string(new_dir.path().join("settings.json")).unwrap(),
+            "{\"theme\":\"Light\"}"
+        );
+    }
+
+    /// The migration half of [`init_data_dir`] with explicit dirs (the full
+    /// function reads process-global state: env + current exe).
+    fn migrate(legacy: &std::path::Path, dir: &std::path::Path) {
+        for file in PERSISTED_FILES {
+            let from = legacy.join(file);
+            let to = dir.join(file);
+            if !to.exists() && from.is_file() {
+                std::fs::copy(&from, &to).unwrap();
+            }
+        }
+    }
 }

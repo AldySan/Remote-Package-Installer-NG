@@ -106,13 +106,19 @@ impl EngineHandle {
 }
 
 /// Spawn the engine with the given settings (persisting under the default
-/// user data dir).
+/// data dir — see [`crate::settings::data_dir`]).
 pub fn spawn(settings: Settings) -> EngineHandle {
     spawn_with(settings, None)
 }
 
 /// Spawn the engine with an explicit data directory (used by tests and
-/// headless embedding; `None` = default user data dir).
+/// headless embedding; `None` = resolve the default data dir at startup).
+///
+/// **v0.0.2 regression fixed here:** `None` used to be passed through as
+/// "no data dir", which made every settings/queue save a silent no-op —
+/// settings appeared to save but never survived a restart. `None` now
+/// resolves (and creates/migrates) the real data dir, exactly like the
+/// desktop app expects.
 pub fn spawn_with(settings: Settings, data_dir: Option<PathBuf>) -> EngineHandle {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -123,7 +129,10 @@ pub fn spawn_with(settings: Settings, data_dir: Option<PathBuf>) -> EngineHandle
     let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Event>();
 
     let settings = Arc::new(Mutex::new(settings));
-    let data_dir = Arc::new(data_dir);
+    let data_dir = Arc::new(match data_dir {
+        Some(dir) => Some(dir),
+        None => crate::settings::init_data_dir(),
+    });
     runtime.spawn(async move {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
         let mut inner = EngineInner::new(settings.clone(), evt_tx, internal_tx, data_dir.clone());
