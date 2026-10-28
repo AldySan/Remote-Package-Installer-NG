@@ -152,3 +152,75 @@ before failing.
   clean (CI gates on the same).
 - No real-console hardware was available; console-side behavior claims remain
   backed by `docs/BASELINE.md` evidence and the mock only — unchanged policy.
+
+---
+
+## 5. Addendum — v2 API integration audit (NextGen support)
+
+Scope: the v2 client (`rpi/types.rs`, `rpi/client.rs`), engine integration,
+mock coverage, and a re-review of every touched path. The fork's own source
+(`AldySan/ps4_remote_pkg_installer_nextgen` @ v0.0.2) was read line-by-line
+against its `docs/API.md`.
+
+### Findings in the console-side fork (reported, worked around client-side)
+
+- **P1 (fork)** — `POST /api/v2/jobs/<id>/{pause,resume,stop}` is documented
+  as POST but `server.c` only routes it under GET/HEAD: the POST router never
+  matches the path, so POST answers 404. Client workaround: POST first (the
+  documented contract, correct for fixed builds), fall back to GET exactly
+  once on 404. Covered by `v2_job_op_falls_back_to_get_after_post_404`, which
+  reproduces the quirk in the mock and asserts the client exercised it.
+- **P3 (fork, informational)** — the v2 jobs registry is in-memory with
+  32 slots and reclaims the oldest terminal slot when full; a PC reconnect
+  after a console app restart sees an empty list. The client treats
+  "job missing from list" as an *unknown outcome* (never a failure, never a
+  resubmission), which is the honest reading.
+
+### Bugs found in RPI-NG while integrating (fixed)
+
+- **P1 — `task_id: -1` was misclassified as "untrackable"** (client/engine).
+  Both dialects use `-1` for "already installed"; the old `task_id <= 0`
+  check turned that into `MissingTaskId` → item parked as `Unknown` with a
+  misleading "no task id" error. Now `-1` completes the item with the
+  console's own report (`engine_v2_already_installed_completes_without_polling`).
+- **P2 — fail bodies carrying a human-readable `error` string were dropped**
+  (client). v2 install failures answer HTTP 500 with
+  `{"status":"fail","error":"..."}`; the parser only extracted `error_code`
+  and discarded the message. The message now lands in the error gloss
+  (`v2_install_failure_message_is_surfaced`).
+- **P2 — mixed-backend lifecycle endpoints** (engine). Pause/resume/stop chose
+  the v2 job endpoint purely by the *item's* `job_id`. An item submitted via a
+  v2 backend, then reconnected to a legacy-only backend, would silently no-op
+  its lifecycle ops. Endpoint choice is now gated on the *current*
+  connection's `api_v2` capability.
+- **P3 — v2 install did not validate the task id** (client). A malformed
+  `task_id: 0` would have spawned a poller for a ghost task; `check_task_id`
+  now applies to v2 installs as well.
+- **P3 — reconcile left unattached v2 items without a hint** (engine). When
+  more than one job was still active console-side, the second and later items
+  stayed `Unknown` with `error: None` — no explanation. They now carry the
+  same "console still reports this job; it will be resumed after the monitored
+  item finishes" hint as the legacy path.
+
+### Performance (applied, measured by design not benchmarks)
+
+- v2 progress polling replaces N per-task `get_task_progress` round-trips with
+  **one** `GET /api/v2/jobs` per tick — the console answers every item in a
+  single response.
+- v2 reconcile replaces per-item `find_task` probes with one jobs request.
+- v2 speed/ETA come from the console's own 1s-sample EMA (`taskman.c`
+  `slot_refresh_derived`) instead of being re-derived client-side from poll
+  deltas at PC poll cadence.
+
+### Verification
+
+- 54 tests green (`cargo test --workspace`), including 10 new v2 tests:
+  probe identity detection, legacy-backend no-v2, install/jobs roundtrip,
+  POST→GET fallback with the fork's quirk reproduced, error-message
+  surfacing, `task_id: -1` semantics, and four engine flows (end-to-end,
+  already-installed, pause/resume via fallback, disconnect→reconnect
+  reconcile via the jobs list).
+- `cargo fmt --check` and `cargo clippy --workspace --all-targets -D warnings`
+  clean.
+- Real-console validation remains unavailable — the NextGen wire behavior is
+  reproduced from its published source, not from hardware.
