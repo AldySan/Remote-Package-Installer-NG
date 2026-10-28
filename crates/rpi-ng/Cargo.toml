@@ -1,0 +1,18 @@
+[package]
+name = "rpi-ng"
+description = "Remote Package Installer NG — desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "remote-package-installer-ng"
+path = "src/main.rs"
+
+[dependencies]
+rpi-ng-core = { path = "../rpi-ng-core" }
+eframe = { version = "0.37", features = ["default_fonts"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+tokio = { version = "1", features = ["rt"] }

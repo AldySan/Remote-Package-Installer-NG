@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/rpi-ng-core", "crates/rpi-ng"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/AldySan/Remote-Package-Installer-NG"
+rust-version = "1.95"
+
+# Maximum optimization for published binaries. Slower to compile, which is
+# fine for release builds — see docs/BUILDING.md.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[workspace.lints.rust]
+unsafe_code = "deny"

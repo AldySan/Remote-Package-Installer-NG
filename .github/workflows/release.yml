@@ -1,0 +1,113 @@
+name: Release
+
+# Tag pushes (v*) build optimized archives for all three platforms and attach
+# them to a GitHub Release. workflow_dispatch runs the builds without
+# publishing anything (dry run).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_VERSION: ${{ github.ref_name }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows-x64
+            os: windows-latest
+            binary: remote-package-installer-ng.exe
+          - label: Linux-x64
+            # ubuntu-22.04 instead of latest: older glibc, so the binary runs
+            # on more distros.
+            os: ubuntu-22.04
+            binary: remote-package-installer-ng
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release, locked)
+        run: cargo build --release --locked
+      - name: Stage files
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "target/release/${{ matrix.binary }}" staging/
+          cp README.md LICENSE staging/
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path staging/* -DestinationPath "RemotePackageInstallerNG-${{ env.APP_VERSION }}-${{ matrix.label }}.zip"
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf "RemotePackageInstallerNG-${{ env.APP_VERSION }}-${{ matrix.label }}.tar.gz" -C staging .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.label }}
+          path: RemotePackageInstallerNG-${{ env.APP_VERSION }}-${{ matrix.label }}.*
+
+  build-macos:
+    name: Build (macOS-universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release, both architectures)
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: Create universal binary and package
+        run: |
+          mkdir -p staging
+          lipo -create \
+            target/aarch64-apple-darwin/release/remote-package-installer-ng \
+            target/x86_64-apple-darwin/release/remote-package-installer-ng \
+            -output staging/remote-package-installer-ng
+          cp README.md LICENSE staging/
+          tar -czf "RemotePackageInstallerNG-${{ env.APP_VERSION }}-macOS-universal.tar.gz" -C staging .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-macOS-universal
+          path: RemotePackageInstallerNG-${{ env.APP_VERSION }}-macOS-universal.tar.gz
+
+  publish:
+    name: Publish release
+    needs: [build, build-macos]
+    # Only publish when an actual version tag triggered the run.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: archive-*
+          merge-multiple: true
+      - name: Create release and upload archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist/
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY"; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Remote Package Installer NG $TAG" \
+              --notes-file .github/RELEASE_NOTES.md
+          fi
