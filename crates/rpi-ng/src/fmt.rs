@@ -26,6 +26,19 @@ pub fn bps(n: u64) -> String {
     }
 }
 
+/// Megabits per second (network-style), from a bytes-per-second rate.
+/// Adaptive precision so both a gigabit LAN and an idle server read well.
+pub fn mbps(bytes_per_sec: f64) -> String {
+    let mbps = bytes_per_sec * 8.0 / 1_000_000.0;
+    if mbps >= 100.0 {
+        format!("{mbps:.0} Mbps")
+    } else if mbps >= 10.0 {
+        format!("{mbps:.1} Mbps")
+    } else {
+        format!("{mbps:.2} Mbps")
+    }
+}
+
 pub fn duration(sec: u64) -> String {
     let d = Duration::from_secs(sec.min(99 * 3600 + 3599));
     let h = d.as_secs() / 3600;

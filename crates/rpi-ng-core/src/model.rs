@@ -440,11 +440,20 @@ pub struct ConsoleInfo {
 }
 
 /// Local file server part of a [`Snapshot`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ServerInfo {
     pub bind: SocketAddr,
     /// Base URL the console should use, e.g. `http://192.168.1.20:53742`.
     pub base_url: String,
+    /// Smoothed outgoing rate (response body bytes/s) — the download the
+    /// console sees. Sampled per poll tick / 250 ms ticker.
+    pub tx_bps: f64,
+    /// Smoothed incoming rate (request bytes/s) — tiny control traffic.
+    pub rx_bps: f64,
+    /// Total body bytes served since the server started.
+    pub tx_total: u64,
+    /// Total request bytes received since the server started.
+    pub rx_total: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
