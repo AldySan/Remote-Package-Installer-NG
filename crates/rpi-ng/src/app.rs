@@ -17,6 +17,10 @@ const MAX_LOG_LINES: usize = 500;
 pub struct App {
     engine: Option<EngineHandle>,
     pub(crate) settings: Settings,
+    /// Editable copy shown while the settings window is open. It must live
+    /// here (not as a per-frame local) or every edit is dropped before the
+    /// user can press Save — that was the v0.0.1 settings bug.
+    pub(crate) settings_draft: Option<Settings>,
     pub(crate) snapshot: Snapshot,
     pub(crate) logs: VecDeque<(u64, LogLevel, String)>,
     /// Latest discovery results (empty until a scan finishes).
@@ -46,6 +50,7 @@ impl App {
         Self {
             engine: Some(engine),
             settings,
+            settings_draft: None,
             snapshot: Snapshot::default(),
             logs: VecDeque::new(),
             discovered: Vec::new(),
@@ -70,7 +75,13 @@ impl App {
     }
 
     fn apply_theme(&self, ctx: &egui::Context) {
-        let pref = match self.settings.theme {
+        // Live preview: while the settings window is open, render with the
+        // draft's theme so the user sees the change before pressing Save.
+        let theme = self
+            .settings_draft
+            .as_ref()
+            .map_or(self.settings.theme, |draft| draft.theme);
+        let pref = match theme {
             ThemeMode::System => egui::ThemePreference::System,
             ThemeMode::Light => egui::ThemePreference::Light,
             ThemeMode::Dark => egui::ThemePreference::Dark,
@@ -96,6 +107,12 @@ impl App {
                 Event::DiscoveryDone(found) => {
                     self.discovered = found;
                     self.discovery_running = false;
+                }
+                Event::SettingsChanged(s) => {
+                    // Authoritative refresh from the engine (SetSettings echo,
+                    // remembered-console updates). The settings-window draft
+                    // is separate state and is intentionally left alone.
+                    self.settings = s;
                 }
             }
         }
@@ -213,6 +230,13 @@ impl eframe::App for App {
                     }
                     if ui.button("Settings…").clicked() {
                         self.show_settings = !self.show_settings;
+                        // Seed the draft from the (engine-kept-fresh) settings
+                        // on open; discard it on toggle-off.
+                        self.settings_draft = if self.show_settings {
+                            Some(self.settings.clone())
+                        } else {
+                            None
+                        };
                     }
                 });
             });
@@ -243,6 +267,10 @@ impl eframe::App for App {
             let mut open = self.show_settings;
             settings_view::show(self, ui.ctx(), &mut open);
             self.show_settings = open;
+            if !self.show_settings {
+                // Closed via the window's ✕ — discard unsaved edits.
+                self.settings_draft = None;
+            }
         }
         if self.show_about {
             let mut open = self.show_about;
