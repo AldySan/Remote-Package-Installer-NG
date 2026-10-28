@@ -24,6 +24,22 @@ pub struct Settings {
     pub remembered: Vec<RememberedConsole>,
     /// Auto-start the next queued item when the console finishes one.
     pub auto_advance: bool,
+    /// What happens to the rest of the queue when a transfer fails.
+    pub on_failure: FailurePolicy,
+    /// Look for a newer release on GitHub when the app starts (the check
+    /// sends nothing but a plain GET to the releases API).
+    pub auto_check_updates: bool,
+}
+
+/// Queue behavior after a failed transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FailurePolicy {
+    /// Keep going: mark the item failed, start the next queued one.
+    #[default]
+    Continue,
+    /// Park the queue: nothing else starts until the user says so.
+    Pause,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -52,6 +68,8 @@ impl Default for Settings {
             folder_scan_recursive: true,
             remembered: Vec::new(),
             auto_advance: true,
+            on_failure: FailurePolicy::default(),
+            auto_check_updates: true,
         }
     }
 }
@@ -77,6 +95,10 @@ struct SettingsDoc {
     remembered: Vec<RememberedConsole>,
     #[serde(default = "default_true")]
     auto_advance: bool,
+    #[serde(default)]
+    on_failure: FailurePolicy,
+    #[serde(default = "default_true")]
+    auto_check_updates: bool,
 }
 
 fn default_true() -> bool {
@@ -104,6 +126,8 @@ impl From<Settings> for SettingsDoc {
             folder_scan_recursive: s.folder_scan_recursive,
             remembered: s.remembered,
             auto_advance: s.auto_advance,
+            on_failure: s.on_failure,
+            auto_check_updates: s.auto_check_updates,
         }
     }
 }
@@ -120,6 +144,8 @@ impl From<SettingsDoc> for Settings {
             folder_scan_recursive: d.folder_scan_recursive,
             remembered: d.remembered,
             auto_advance: d.auto_advance,
+            on_failure: d.on_failure,
+            auto_check_updates: d.auto_check_updates,
         }
     }
 }
