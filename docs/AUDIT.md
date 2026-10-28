@@ -331,3 +331,74 @@ to the activity panel.
 covering padding (`0.1` vs `0.1.0`), `v` prefixes, pre-releases and garbage.
 A bug caught during review: the initial comparison was inverted
 (`cur > new`) — the test suite flagged it immediately.
+
+## 8. Addendum — findings from v0.0.2 user testing (fixed in v0.0.3)
+
+### 8.1 Settings "saved" but never persisted (root cause: silent no-op)
+
+**Symptom:** every setting (theme, port, policies) applied live after Save,
+then reverted to defaults on the next launch.
+
+**Root cause:** `engine::spawn` called `spawn_with(settings, None)`, and
+`None` was passed through verbatim as the engine's data dir. Every persist
+site did `save_in(self.data_dir.as_deref())`, and `save_in(None)` is a
+**silent `Ok(())`** (the no-dir case exists for hermetic test runs). So the
+Save button updated the in-memory settings — which is why the live behavior
+looked correct — but no bytes ever reached the disk. `queue.json`
+persistence shipped in v0.0.1 was disabled by the exact same path (its
+restart-recovery tests all pass explicit dirs, which is why the suite never
+caught it: `spawn_with(_, Some(dir))` works, only the `None` default was
+broken).
+
+**Fixes:**
+
+- `spawn_with` resolves `None` through the new `settings::init_data_dir()`
+  (resolve → create → migrate), so the desktop app — and any embedder using
+  the default — gets a real directory. The doc comment that claimed
+  "`None` = default user data dir" now matches the behavior.
+- The data dir itself moved **next to the executable** (portable style —
+  explicit user request: an app in `D:\RPING\` keeps its config in
+  `D:\RPING\`). Resolution order: `RPI_NG_DATA_DIR` env → exe dir → per-OS
+  user dir fallback. A one-time migration copies pre-portable
+  `settings.json`/`queue.json` from the old user-data location, never
+  overwriting existing files, and never running under an env override
+  (tests stay hermetic and cannot read the host user's real files).
+- The first activity-log line now reports the resolved location, so "where
+  is my config" is answerable from inside the app.
+
+**Regression tests:** `settings::tests` covers resolution precedence
+(env wins / exe dir / empty-env ignored / no-exe fallback) and the
+one-shot migration semantics (copies once, never overwrites).
+
+### 8.2 Transfer activity + file-server self-check (feature requests)
+
+- **Live in/out rates:** the file server now counts body bytes sent (`tx`)
+  and request bytes received (`rx`) per request; rates are EMA-smoothed
+  (α = 0.5, ≥100 ms sample spacing) and surfaced through `ServerInfo` in
+  every snapshot. A 250 ms engine ticker (active only while the server is
+  up) keeps the UI readout live between poll ticks and lets the rate decay
+  to zero when a transfer ends. Accounting is deliberately approximate and
+  documented: tx = promised `Content-Length` (a mid-body disconnect
+  over-counts by the unsent tail), rx = request-line+header size estimate
+  via an axum middleware.
+- **Check File Server:** `fileserver::self_check` is a loopback `HEAD`
+  probe of an unregistered URL. Outcome taxonomy is diagnostic by design:
+  `Responded(code)` (any HTTP answer — the server is fine, so a console
+  that still cannot download points at the network/firewall between the
+  two machines), `NotRunning` (nothing listening — the server starts with
+  a console session), `NoAnswer` (port accepts, nothing replies — firewall
+  / antivirus interception). Std-only, run on a plain background thread
+  (same channel-poll pattern as the update checker), offered both in the
+  queue's file-server strip and in Settings, and every outcome is logged
+  with an actionable sentence.
+- **UI text fixes from user feedback:** the troubleshooting block on the
+  connect screen and the two settings footnotes were `.small()` — barely
+  legible. Both are regular size now; the footnotes moved from next to the
+  Save button to a full-width footnote area under a separator (still weak
+  color, so they read as quiet bylines rather than competing with the
+  controls).
+
+**Verification:** `fileserver::tests` covers the EMA math (convergence,
+decay, tiny-delta guard), the dead-port classification, and an end-to-end
+probe + ranged download against the real server asserting exact `tx`
+accounting, positive `rx`, and request counts.
