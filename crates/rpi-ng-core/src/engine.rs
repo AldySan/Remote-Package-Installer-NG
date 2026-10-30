@@ -497,7 +497,8 @@ impl EngineInner {
 
     async fn cmd_remove(&mut self, id: ItemId) {
         // If active: stop first (best effort remote cleanup).
-        if self.active.as_ref().map(|a| a.item_id) == Some(id) {
+        let was_active = self.active.as_ref().map(|a| a.item_id) == Some(id);
+        if was_active {
             self.stop_active_remote().await;
         }
         if let Some(item) = self.queue.remove(id) {
@@ -517,6 +518,12 @@ impl EngineInner {
                         .unwrap_or_default()
                 ),
             );
+        }
+        if was_active {
+            // The monitored task is gone — keep the queue moving like Cancel
+            // does (v0.0.4 fix: the queue used to sit idle until the user
+            // pressed Start queue again).
+            self.maybe_start_next().await;
         }
     }
 
@@ -779,7 +786,28 @@ impl EngineInner {
                                 it.attempts = attempts + 1;
                                 it.error = Some(e.to_string());
                             }
-                            let urls = self.rebuild_urls(item).unwrap_or_default();
+                            // Never schedule a retry that would POST an empty
+                            // URL list: without the local file server there is
+                            // nothing to install (v0.0.4 fix).
+                            let Some(urls) = self.rebuild_urls(item) else {
+                                if let Some(it) = self.queue.get_mut(item) {
+                                    it.state = ItemState::Failed;
+                                    it.error = Some(
+                                        "the local file server is not running — reconnect, then retry"
+                                            .into(),
+                                    );
+                                    it.updated_at = unix_ms();
+                                }
+                                self.persist_queue();
+                                self.log(
+                                    LogLevel::Error,
+                                    format!(
+                                        "Item #{item}: cannot rebuild package URLs — the local file server is not running",
+                                    ),
+                                );
+                                self.on_transfer_failure().await;
+                                return;
+                            };
                             let backoff = Duration::from_secs(1u64 << attempts);
                             self.log(
                                 LogLevel::Warn,
@@ -1857,7 +1885,13 @@ fn walk_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        // `file_type()` (dirent, no symlink follow) decides recursion: a
+        // directory symlink would otherwise recurse into itself forever
+        // (v0.0.4 fix — a symlink loop in a scanned folder hung the app).
+        // Explicitly symlinked *files* still pass through `is_pkg`, which
+        // resolves the link.
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if is_dir {
             if recursive
                 && path
                     .file_name()
@@ -1881,4 +1915,41 @@ fn is_pkg(path: &Path) -> bool {
         .map(|e| e.eq_ignore_ascii_case("pkg"))
         .unwrap_or(false)
         && path.is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_dir_survives_symlink_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("game.pkg"), b"pkg").unwrap();
+        // A self-referencing directory symlink: with the old is_dir()-follows-
+        // symlinks recursion this walk never terminated (v0.0.4 fix).
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+        let mut out = Vec::new();
+        walk_dir(dir.path(), true, &mut out);
+        assert_eq!(out.len(), 1, "only the real pkg, and the walk terminated");
+        assert!(out[0].ends_with("game.pkg"));
+    }
+
+    #[test]
+    fn walk_dir_finds_pkgs_in_plain_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.pkg"), b"x").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("b.pkg"), b"x").unwrap();
+        std::fs::write(sub.join("note.txt"), b"x").unwrap();
+        let mut out = Vec::new();
+        walk_dir(dir.path(), true, &mut out);
+        out.sort();
+        assert_eq!(out.len(), 2, "recursive scan finds nested packages");
+        let mut flat = Vec::new();
+        walk_dir(dir.path(), false, &mut flat);
+        assert_eq!(flat.len(), 1, "flat scan sees only the top-level pkg");
+        assert!(flat[0].ends_with("a.pkg"));
+    }
 }

@@ -20,15 +20,26 @@ pub fn repair(body: &str) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         if in_string {
-            out.push(b as char);
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
+            if b < 0x80 {
+                out.push(b as char);
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+                i += 1;
+            } else {
+                // Multi-byte UTF-8 inside a string (game titles are often
+                // non-ASCII): copy the whole char. Pushing raw bytes as chars
+                // would Latin-1 them into mojibake. The escape state machine
+                // is unaffected — continuation bytes are never '"' or '\'.
+                let rest = &body[i..];
+                let ch = rest.chars().next().unwrap_or('\u{FFFD}');
+                out.push(ch);
+                i += ch.len_utf8();
             }
-            i += 1;
             continue;
         }
         match b {
@@ -136,5 +147,26 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&repair(raw)).unwrap();
         assert_eq!(v["bits"], 0xAB);
         assert_eq!(v["pieces"][2], 16);
+    }
+
+    #[test]
+    fn preserves_multibyte_utf8_inside_strings() {
+        // Regression (v0.0.4): the in-string branch used to push raw bytes as
+        // chars (Latin-1), corrupting non-ASCII titles into mojibake.
+        let raw = r#"{"status":"success","title":"龍が如く極 Save","bits":0x20}"#;
+        let v: serde_json::Value = serde_json::from_str(&repair(raw)).unwrap();
+        assert_eq!(v["title"], "龍が如く極 Save");
+        assert_eq!(v["bits"], 32);
+    }
+
+    #[test]
+    fn multibyte_after_escaped_quote_and_after_hex() {
+        // Non-ASCII both after an escaped quote inside the same string and in
+        // a value that follows a repaired hex literal.
+        let raw = "{\"a\":\"x\\\"é€\", \"b\": 0x1, \"c\":\"日本語\"}";
+        let v: serde_json::Value = serde_json::from_str(&repair(raw)).unwrap();
+        assert_eq!(v["a"], "x\"é€");
+        assert_eq!(v["b"], 1);
+        assert_eq!(v["c"], "日本語");
     }
 }
