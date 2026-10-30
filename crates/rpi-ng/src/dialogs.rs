@@ -27,7 +27,9 @@ impl DialogPick {
 /// Show a multi-select PKG file dialog.
 pub fn pick_pkg_files() -> DialogPick {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
+    // Clone kept for the spawn-failure path: `tx` is moved into the thread.
+    let fallback_tx = tx.clone();
+    let spawned = std::thread::Builder::new()
         .name("rpi-ng-dialog".into())
         .spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -52,14 +54,20 @@ pub fn pick_pkg_files() -> DialogPick {
                 let _ = tx.send(outcome);
             });
         })
-        .expect("dialog thread");
+        .is_ok();
+    if !spawned {
+        // Thread-spawn failure must still resolve the promise (same contract
+        // as the update/server-check helpers) instead of panicking the GUI.
+        let _ = fallback_tx.send(DialogOutcome::Cancelled);
+    }
     DialogPick { rx }
 }
 
 /// Show a folder-pick dialog.
 pub fn pick_folder() -> DialogPick {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
+    let fallback_tx = tx.clone();
+    let spawned = std::thread::Builder::new()
         .name("rpi-ng-dialog".into())
         .spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -81,6 +89,9 @@ pub fn pick_folder() -> DialogPick {
                 let _ = tx.send(outcome);
             });
         })
-        .expect("dialog thread");
+        .is_ok();
+    if !spawned {
+        let _ = fallback_tx.send(DialogOutcome::Cancelled);
+    }
     DialogPick { rx }
 }
