@@ -71,6 +71,18 @@ struct Registry {
 
 impl Registry {
     fn register(&mut self, path: PathBuf, name: String) -> PartId {
+        // Re-registering the same (path, name) must not allocate a second
+        // entry: the engine re-registers a part on every submit / retry /
+        // requeue, and duplicate entries would grow the registry for the
+        // whole session while keeping stale URLs alive (v0.0.5 fix). Hand
+        // back the existing id instead.
+        if let Some((&id, _)) = self
+            .entries
+            .iter()
+            .find(|(_, (p, n))| *p == path && *n == name)
+        {
+            return id;
+        }
         let id = self.next;
         self.next += 1;
         self.entries.insert(id, (path, name));
@@ -511,6 +523,29 @@ pub fn self_check(port: u16, timeout: Duration) -> ServerCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn registering_the_same_file_reuses_its_id() {
+        // v0.0.5 regression: every re-registration used to allocate a fresh
+        // entry, so submits/retries slowly grew the registry and kept stale
+        // URLs alive for the whole session.
+        let server = FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let path = PathBuf::from("/does/not/need/to/exist.pkg");
+        let a = server.register(path.clone(), Some("a.pkg".into()));
+        let b = server.register(path.clone(), Some("a.pkg".into()));
+        assert_eq!(a, b, "re-registration must return the existing id");
+        // A different display name is a different registration.
+        let c = server.register(path.clone(), Some("renamed.pkg".into()));
+        assert_ne!(a, c);
+        // After unregistering, the id is free again: the next registration
+        // for the same file gets a fresh entry (old URLs 404).
+        server.unregister(a);
+        let d = server.register(path, Some("a.pkg".into()));
+        assert_ne!(a, d);
+        server.shutdown();
+    }
 
     #[test]
     fn rates_track_deltas_and_decay() {

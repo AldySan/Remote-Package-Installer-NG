@@ -93,6 +93,11 @@ struct MockState {
     /// Count POSTs seen on /api/v2/jobs/<id>/<op> — proves the client
     /// exercised the POST-first fallback (NextGen answers them with 404).
     v2_op_posts: std::collections::HashMap<String, usize>,
+    /// Delay before /api/install answers — widens the engine's submit
+    /// window so submit-window regressions are deterministic.
+    install_delay_ms: u64,
+    /// Task ids that received a stop_task call (best-effort cleanup proof).
+    stopped_tasks: Vec<i64>,
 }
 
 struct MockConsole {
@@ -126,6 +131,8 @@ impl MockConsole {
             jobs: Default::default(),
             already_installed: false,
             v2_op_posts: Default::default(),
+            install_delay_ms: 0,
+            stopped_tasks: Vec::new(),
         }));
         let app = Router::new()
             .route("/", get(v2_system))
@@ -137,7 +144,7 @@ impl MockConsole {
             .route("/api/find_task", post(find_task))
             .route("/api/pause_task", post(ok_task))
             .route("/api/resume_task", post(ok_task))
-            .route("/api/stop_task", post(ok_task))
+            .route("/api/stop_task", post(stop_task))
             .route("/api/start_task", post(ok_task))
             .route("/api/unregister_task", post(ok_task))
             .route("/api/v2/system", get(v2_system))
@@ -188,6 +195,10 @@ impl MockConsole {
     fn v2_op_posts(&self, op: &str) -> usize {
         *self.state.lock().unwrap().v2_op_posts.get(op).unwrap_or(&0)
     }
+
+    fn stopped_tasks(&self) -> Vec<i64> {
+        self.state.lock().unwrap().stopped_tasks.clone()
+    }
 }
 
 async fn unsupported() -> Response {
@@ -223,6 +234,18 @@ async fn find_task(
 }
 
 async fn ok_task(Json(_body): Json<Value>) -> Response {
+    Json(json!({"status": "success"})).into_response()
+}
+
+/// Like ok_task, but records the stopped task id — evidence that the
+/// engine's best-effort remote cleanup actually reached the console.
+async fn stop_task(
+    State(state): State<Arc<Mutex<MockState>>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Some(id) = body["task_id"].as_i64() {
+        state.lock().unwrap().stopped_tasks.push(id);
+    }
     Json(json!({"status": "success"})).into_response()
 }
 
@@ -473,6 +496,12 @@ async fn v2_job_op(
 }
 
 async fn install(State(state): State<Arc<Mutex<MockState>>>, Json(body): Json<Value>) -> Response {
+    let delay_ms = state.lock().unwrap().install_delay_ms;
+    if delay_ms > 0 {
+        // Simulate a slow console answer: the engine's submit window is
+        // wide open while this is pending.
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
     {
         let mut st = state.lock().unwrap();
         st.installs.push(body.clone());
@@ -2274,5 +2303,173 @@ async fn engine_broadcasts_settings_changes() {
         _ => unreachable!("wait_for_event only returns matching events"),
     }
 
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// v0.0.5 regressions: the submit window (request in flight, console has not
+// answered yet)
+// ---------------------------------------------------------------------------
+
+/// Pressing Start again while the first install request is still in flight
+/// used to submit the NEXT queued item too: `active` is only set when the
+/// console answers, so the single-active-task invariant had a hole. The
+/// second submit replaced the first item's poller and stranded it in
+/// "Transferring" forever. The engine must serialize submits.
+#[tokio::test]
+async fn engine_start_during_submit_window_does_not_double_submit() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let first = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0D001_00-SUBMITRACEONE.pkg",
+        "UP0001-CUSA0D001_00-SUBMITRACEONE",
+    );
+    let second = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0D002_00-SUBMITRACETWO.pkg",
+        "UP0001-CUSA0D002_00-SUBMITRACETWO",
+    );
+
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    // Wide submit window: the install answer takes 400 ms.
+    mock.state.lock().unwrap().install_delay_ms = 400;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![first, second],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| s.items.len() == 2, Duration::from_secs(10)).await;
+
+    // Two Starts back-to-back: the second lands while the first request is
+    // still pending (deterministic — commands are queued, the answer is
+    // delayed by the mock).
+    handle.send(Command::Start);
+    handle.send(Command::Start);
+
+    // Both items must still complete — sequentially, not concurrently.
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().all(|i| i.state == ItemState::Completed),
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(snap.items.len(), 2);
+    assert_eq!(
+        mock.installs().len(),
+        2,
+        "each package must be submitted exactly once"
+    );
+    assert_eq!(mock.tasks().len(), 2);
+    handle.shutdown();
+}
+
+/// Cancelling while the install request is still in flight used to be a
+/// silent no-op (the cancel path refused "active" items, and Submitting
+/// counts as active) — the console's late answer then started the task
+/// anyway. The cancel must stick, and the late answer's ghost task must be
+/// stopped best-effort.
+#[tokio::test]
+async fn engine_cancel_during_submit_window_is_honored() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA0E001_00-SUBMITCANCEL.pkg",
+        "UP0001-CUSA0E001_00-SUBMITCANCEL",
+    );
+
+    let mock = MockConsole::start(Dialect::BrokenHex).await;
+    mock.state.lock().unwrap().install_delay_ms = 400;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Submitting),
+        Duration::from_secs(10),
+    )
+    .await;
+    let id = snap.items[0].id;
+
+    // Cancel inside the submit window.
+    handle.send(Command::Cancel(id));
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == id && i.state == ItemState::Cancelled)
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Let the delayed console answer land, then confirm: the item is still
+    // Cancelled (not resurrected) and the ghost task was stopped.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let mut latest = snap;
+    for ev in handle.poll_events() {
+        if let Event::Snapshot(s) = ev {
+            latest = s;
+        }
+    }
+    let item = latest.items.iter().find(|i| i.id == id).unwrap();
+    assert_eq!(item.state, ItemState::Cancelled);
+    assert_eq!(
+        mock.installs().len(),
+        1,
+        "the request was already in flight when cancelled"
+    );
+    let stopped = mock.stopped_tasks();
+    assert!(
+        !stopped.is_empty(),
+        "the late answer's task must be stopped best-effort, got {stopped:?}"
+    );
     handle.shutdown();
 }

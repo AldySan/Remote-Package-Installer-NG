@@ -54,10 +54,10 @@ pub fn duration(sec: u64) -> String {
 }
 
 pub fn clock(unix_ms: u64) -> String {
-    // Local-time rendering without pulling a chrono/tz dependency: use the
-    // platform's `HH:MM:SS` via a tiny manual UTC fallback. UI logs are
-    // informational; ISO-UTC is acceptable and deterministic.
+    // No timezone dependency: log timestamps render UTC and *say so* —
+    // otherwise a UTC+7 user reads every entry seven hours off their wall
+    // clock with no hint (v0.0.5 fix: the marker used to be missing).
     let secs = unix_ms / 1000;
     let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
-    format!("{h:02}:{m:02}:{s:02}")
+    format!("{h:02}:{m:02}:{s:02} UTC")
 }
