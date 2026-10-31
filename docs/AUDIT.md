@@ -402,3 +402,108 @@ one-shot migration semantics (copies once, never overwrites).
 decay, tiny-delta guard), the dead-port classification, and an end-to-end
 probe + ranged download against the real server asserting exact `tx`
 accounting, positive `rx`, and request counts.
+
+---
+
+## 9. Addendum — second full re-audit (v0.0.5)
+
+Date: 2026-11-01 · Method: line-by-line re-read of every module plus the
+test harness, cross-checked against the earlier findings (§1–§8) so nothing
+is double-reported. Baseline before fixes: 85/85 tests green, `clippy -D
+warnings` clean — all findings below are new.
+
+### P1 — the submit window had no guard: two concurrent console tasks (engine)
+
+`maybe_start_next` gated on `self.active`, but `active` is only set when the
+console **answers**. Between `submit()` and `SubmitResult` (LAN round-trip,
+or 1–4 s of transient-retry backoff) any re-trigger — a second Start press
+(the UI's enabled-state lags a snapshot behind), a background parse
+finishing (`ParseDone` → `maybe_start_next`), a Retry, or a per-row Resume —
+submitted the NEXT queued item too. The second `spawn_poller` then replaced
+`self.active`, and the replaced poller died silently (its watch sender
+dropped), stranding the first item in "Transferring" forever.
+
+Fix: a new `submit_in_flight()` predicate (any item in `Submitting`) is
+checked by `maybe_start_next` and `resume_item`. No new state: `Submitting`
+already means "install request in flight or waiting out a backoff".
+Regressions: `engine_start_during_submit_window_does_not_double_submit`
+(mock knob `install_delay_ms` widens the window deterministically — the test
+was verified to fail against the pre-fix engine).
+
+### P2 — cancelling during the submit window was a silent no-op (engine)
+
+`cmd_cancel`'s local branch required `!item.state.is_active()`; a
+`Submitting` item is active, so neither branch ran. The console's late
+answer then flipped the item to `Transferring` — the user pressed Cancel and
+the install went ahead anyway.
+
+Fix: the local branch now accepts everything except `Transferring` /
+`Installing` (owned by the active branch). For a cancelled Submitting item
+the existing late-`SubmitResult` path already best-effort-stops the ghost
+task. Regression: `engine_cancel_during_submit_window_is_honored` (verified
+to fail pre-fix; the mock now records `stop_task` calls).
+
+### P2 — malformed SFO u32 entry panicked the parse thread (sfo)
+
+The `0x0404` arm read a full `u32` guarded only by
+`value_abs + used_size ≤ len`. A crafted/truncated SFO (format `0x0404`,
+`used_size < 4`, value at the buffer tail) indexed out of bounds → panic
+inside `tokio::task::spawn_blocking` → swallowed → `ParseDone` never sent →
+metadata never appeared, with no error anywhere. (§3 of the original audit
+said "no reachable panic found" — this one was missed.)
+
+Fix: the arm now guards `value_abs + 4 ≤ buf.len()` like the `0x0004` arm
+and skips malformed short entries. Regression:
+`short_u32_entry_at_buffer_end_is_skipped_not_panicked` plus two
+well-formed controls (u32 and string entries) — `sfo.rs` had no unit tests
+before.
+
+### P3 — file-server registry grew on every re-registration (fileserver)
+
+`rebuild_urls` re-registers a part on every submit / retry / requeue; each
+`register()` allocated a fresh id and entry while the previous entry stayed
+live for the whole session (stale URL served + one leaked `PathBuf` +
+`String` per submit). Bounded, but monotonic — exactly the pattern a
+"memory violation" audit looks for.
+
+Fix: `Registry::register` is idempotent — the same `(path, name)` returns
+the existing id. Part ids become stable within a session, so `unregister`
+(on Remove / ClearFinished) now removes exactly the live entry.
+Regression: `registering_the_same_file_reuses_its_id`.
+
+### P3 — legacy speed "EMA" never smoothed (engine)
+
+`handle_progress` blended `pv.speed_bps * 0.6`, but `progress_dto_to_view`
+always sets `speed_bps: 0` in the legacy dialect — the previous sample was
+never carried, so every poll displayed 40 % of the instantaneous rate (a
+spiky Mbps readout; the smoothing the comment promised never happened).
+
+Fix: the previous stored speed is read from the item's `progress` and
+blended via a new `blend_speed()` helper (split out like the file server's
+`update_rates` for direct unit testing: `speed_blend_converges_and_decays`).
+
+### P3 — log timestamps were UTC but unlabeled (UI)
+
+`fmt::clock` renders UTC. Users in UTC+7 read every entry seven hours off
+their wall clock with no hint. A tz library stays out of scope (no
+over-engineering); the timestamps now say "UTC".
+
+### Release-process note
+
+`RELEASE_NOTES.md` in the repo still carried the v0.0.3 text when the
+v0.0.4 tag was pushed (the v0.0.4 release body was authored directly on
+GitHub). The file is now updated per release so the tag-triggered workflow
+publishes from the repo again.
+
+### Verification
+
+- 92/92 tests green (`cargo test --workspace`), including the two new
+  submit-window regressions and the SFO/registry/speed-blend units — each
+  submit-window regression was verified to fail against the pre-fix engine.
+- `cargo fmt --check` and `cargo clippy --workspace --all-targets -D
+  warnings` clean; `unsafe_code = "deny"` unchanged.
+- Reviewed and left unchanged this round: the 4 Hz full-queue snapshot
+  clone while connected (already bounded by §3's note and the 2000-file
+  scan cap), per-frame search allocations over small queues, and the
+  `find_task → task_id 0` degradation path (ends in the existing
+  task-gone → Unknown handling).
