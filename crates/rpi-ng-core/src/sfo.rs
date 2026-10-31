@@ -150,7 +150,18 @@ impl Sfo {
                     let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
                     SfoValue::String(String::from_utf8_lossy(&raw[..len]).into_owned())
                 }
-                0x0404 => SfoValue::U32(be_u32(buf, value_abs)),
+                0x0404 => {
+                    // The bounds check above guarantees `value_abs + used_size`
+                    // fits, but a malformed entry can claim used_size < 4 —
+                    // reading a full u32 there would run past the buffer and
+                    // panic the parse thread (v0.0.5 fix; a truncated SFO
+                    // triggered exactly this). Skip such entries instead.
+                    if value_abs + 4 <= buf.len() {
+                        SfoValue::U32(be_u32(buf, value_abs))
+                    } else {
+                        continue;
+                    }
+                }
                 0x0004 => {
                     // Special/int8-ish format; treat as u32 read when possible.
                     if value_abs + 4 <= buf.len() {
@@ -194,5 +205,57 @@ impl Sfo {
     /// Total buffer size cap used by callers.
     pub fn max_total_size() -> usize {
         MAX_TOTAL_SIZE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal SFO with one entry; `fmt` picks the data format, `used` the
+    /// used-size, and the value table gets exactly `used` bytes appended.
+    fn sfo_with_entry(fmt: u16, used: u32, value_bytes: &[u8]) -> Vec<u8> {
+        let key_table = 0x14 + 0x10;
+        let value_table = key_table + 2; // "X\0"
+        let mut buf = Vec::new();
+        buf.extend_from_slice(SFO_MAGIC);
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.extend_from_slice(&(key_table as u32).to_be_bytes());
+        buf.extend_from_slice(&(value_table as u32).to_be_bytes());
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        // entry: key_off 0, fmt, used, max = used, value_off 0
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&fmt.to_be_bytes());
+        buf.extend_from_slice(&used.to_be_bytes());
+        buf.extend_from_slice(&used.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(b"X\0");
+        buf.extend_from_slice(value_bytes);
+        buf
+    }
+
+    /// v0.0.5 regression: a u32 (0x0404) entry whose used_size is shorter
+    /// than 4 bytes and sits at the very end of the buffer used to index out
+    /// of bounds and panic — silently killing the background parse thread.
+    #[test]
+    fn short_u32_entry_at_buffer_end_is_skipped_not_panicked() {
+        let buf = sfo_with_entry(0x0404, 2, &[0xAA, 0xBB]);
+        let sfo = Sfo::parse(&buf).expect("malformed entry must be skipped, not panic");
+        assert!(sfo.entries.is_empty(), "the broken entry is dropped");
+    }
+
+    #[test]
+    fn wellformed_u32_entry_still_parses() {
+        let buf = sfo_with_entry(0x0404, 4, &0x1122_3344u32.to_be_bytes());
+        let sfo = Sfo::parse(&buf).unwrap();
+        assert_eq!(sfo.get_u32("X"), Some(0x1122_3344));
+    }
+
+    #[test]
+    fn string_entries_still_parse() {
+        let val = b"gd\0";
+        let buf = sfo_with_entry(0x0204, val.len() as u32, val);
+        let sfo = Sfo::parse(&buf).unwrap();
+        assert_eq!(sfo.get_str("X"), Some("gd"));
     }
 }

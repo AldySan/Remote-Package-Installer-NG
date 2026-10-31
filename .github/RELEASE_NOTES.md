@@ -1,30 +1,17 @@
-# Remote Package Installer NG v0.0.3
+A maintenance release: a second full re-audit of the v0.0.4 code base found six real issues (and nothing else worth changing) — all fixed here, with regression tests. No new features, no settings or workflow changes.
 
-A small update to the free desktop app that installs PS4 game files (`.pkg`) over your home network — no USB stick, no FTP.
+## Fixed
 
-## What's new
+- **A second "Start queue" press while the console was still accepting a package could start two installs at once.** Between sending the request and the console's answer there was no guard, so a second Start (or a finished background scan, or a Retry) submitted the next package too. The second install silently took over monitoring and the first package could sit at "Transferring" forever. Installs are now strictly serialized: the queue waits for the console to answer before submitting anything else.
+- **Cancelling a package while its request was still in flight did nothing.** The button looked pressed, but the install went ahead anyway once the console answered. Cancelling now sticks, and the task the console created for that late answer is stopped automatically.
+- **A corrupted or truncated package could silently lose its metadata** (title, size, content id). A malformed PARAM.SFO value entry could crash the background parser, which swallowed the error and left the item without details. Malformed entries are now skipped safely.
+- **The file server slowly accumulated duplicate registrations** on every submit/retry of the same package — a small, steady memory creep over a long session, plus stale download URLs staying alive. Re-registering the same file now reuses its existing entry.
+- **The transfer speed readout jittered on classic (legacy) consoles.** The smoothing was wired to a field the console never fills, so every poll showed a raw spike. Speeds now blend with the previous sample, like the network rates do.
+- **Activity log timestamps are now marked "UTC"** — they were always UTC, but unlabeled, so anyone outside UTC+0 read times hours off their wall clock with no hint.
 
-- **Settings now actually stick.** This release fixes a bug where everything you saved (theme, port, queue options) looked fine but silently vanished on the next launch. Sorry about that — and thanks for the report.
-- **Your config lives next to the program.** Settings and the queue are now stored as small JSON files in the same folder as the app itself (e.g. `D:\RPING\`), so the whole folder stays self-contained and portable. The activity log shows the exact location on every start.
-- **See your transfer activity live.** While connected, a file-server line under the toolbar shows the live speeds — megabits per second out to the console and back in — plus the totals for the session.
-- **New "Check File Server" button** (also in Settings): a one-click self-test of the app's own server. If it answers OK but your PS4 still can't download, you know the problem sits between the two machines — firewall or network — not in the app.
-- **Readability fixes:** the troubleshooting text on the connect screen and the small print in Settings are now regular size, and the notes moved below the buttons where they have room to breathe.
+## Internal
 
-## Downloads
+- Test suite: 92 automated tests (was 85) — all self-contained against a mock console, no console needed. Two of the new tests reproduce the submit-window races deterministically via a delayed mock answer.
+- `cargo fmt --check` and `cargo clippy -D warnings` clean; `unsafe` remains denied workspace-wide.
 
-Pick the file for your computer:
-
-- **Windows** — `RemotePackageInstallerNG-v0.0.3-Windows-x64.zip`
-- **Mac** — `RemotePackageInstallerNG-v0.0.3-macos-universal.tar.gz` (works on every Mac)
-- **Linux** — `RemotePackageInstallerNG-v0.0.3-Linux-x64.tar.gz`
-
-First-run notes:
-
-- **Windows** may show "Windows protected your PC" — click *More info*, then *Run anyway*.
-- **macOS** may say the app "cannot be verified" — right-click it, choose *Open*, then *Open* again.
-
-## How to use it
-
-Same as before: open the Package Installer on your PS4, run this app on your computer, add your `.pkg` files, press Start. Line up as many as you like — they install one by one, in order. Full guide in the [README](https://github.com/AldySan/Remote-Package-Installer-NG#how-to-use).
-
-Found a problem? Please [open an issue](https://github.com/AldySan/Remote-Package-Installer-NG/issues) — reports from real consoles help a lot.
+**Install:** download the archive for your platform, extract it next to your packages, and run the executable — the app is portable and stores its settings in the same folder.

@@ -541,7 +541,13 @@ impl EngineInner {
                 );
             }
         } else if let Some(item) = self.queue.get_mut(id)
-            && !item.state.is_active()
+            // Transferring/Installing items are the monitored active task and
+            // are handled by the branch above. Everything else is cancellable
+            // locally — including Submitting (v0.0.5 fix: cancelling during
+            // the submit window used to be a silent no-op, and the console's
+            // late answer then started the task anyway). The late SubmitResult
+            // already best-effort-stops the ghost task.
+            && !matches!(item.state, ItemState::Transferring | ItemState::Installing)
         {
             let task_id = item.task_id;
             let job_id = item.job_id;
@@ -969,12 +975,27 @@ impl EngineInner {
         });
     }
 
+    /// True while an install request is in flight or waiting out a retry
+    /// backoff. The single-active-task invariant must hold across the whole
+    /// submit window — `self.active` is only set once the console *answers*,
+    /// so between `submit()` and `SubmitResult` this is the only guard
+    /// (v0.0.5 fix: a second Start/Retry/parse-finish in that window used to
+    /// submit the next item too, leaving two console tasks running and the
+    /// first item's poller silently replaced).
+    fn submit_in_flight(&self) -> bool {
+        self.queue
+            .items()
+            .iter()
+            .any(|i| i.state == ItemState::Submitting)
+    }
+
     /// Start the next queued item if the engine is running, connected, the
     /// server is up and no task is active. Invalid items are skipped in a loop.
     async fn maybe_start_next(&mut self) {
         loop {
             if !self.running
                 || self.active.is_some()
+                || self.submit_in_flight()
                 || self.console.is_none()
                 || self.server.is_none()
                 || !matches!(self.console_status, ConsoleStatus::Connected)
@@ -1080,14 +1101,22 @@ impl EngineInner {
         match result {
             Ok(mut pv) => {
                 self.poll_failures = 0;
-                // Speed from delta.
+                // Speed from delta. The legacy DTO reports no speed of its own,
+                // so the previous stored sample is the only history — blending
+                // with it is what makes the readout an EMA instead of a
+                // per-poll spike (v0.0.5 fix: the old code blended with
+                // `pv.speed_bps`, which is always 0 in this dialect).
                 let now = Instant::now();
                 if let Some((t0, b0)) = self.last_sample {
                     let dt = now.duration_since(t0).as_secs_f64();
                     if dt >= 0.4 && pv.transferred >= b0 {
-                        let ema = ((pv.transferred - b0) as f64 / dt * 0.4
-                            + pv.speed_bps as f64 * 0.6) as u64;
-                        pv.speed_bps = ema;
+                        let prev_bps = self
+                            .queue
+                            .get(item)
+                            .and_then(|i| i.progress)
+                            .map(|p| p.speed_bps)
+                            .unwrap_or(0);
+                        pv.speed_bps = blend_speed(prev_bps, pv.transferred - b0, dt);
                     }
                 }
                 self.last_sample = Some((now, pv.transferred));
@@ -1342,6 +1371,15 @@ impl EngineInner {
             self.log(
                 LogLevel::Warn,
                 "Another item is already being monitored — wait for it to finish first",
+            );
+            return;
+        }
+        if self.submit_in_flight() {
+            // Resuming now would race the in-flight submit for the
+            // single-active-task slot (v0.0.5 fix).
+            self.log(
+                LogLevel::Warn,
+                "An install request is still in flight — wait for the console to answer first",
             );
             return;
         }
@@ -1774,6 +1812,13 @@ impl EngineInner {
     }
 }
 
+/// Blend a progress-poll delta into the displayed speed (bytes/s).
+/// 40 % fresh + 60 % previous — same idea as the file-server rate EMA.
+/// Split out so the math is directly testable.
+fn blend_speed(prev_bps: u64, delta_bytes: u64, dt: f64) -> u64 {
+    ((delta_bytes as f64 / dt) * 0.4 + prev_bps as f64 * 0.6) as u64
+}
+
 /// Map a v2 job entry to the UI progress view (shared by the poller and the
 /// reconcile path).
 fn v2_job_progress(job: &V2Job) -> ProgressView {
@@ -1933,6 +1978,24 @@ mod tests {
         walk_dir(dir.path(), true, &mut out);
         assert_eq!(out.len(), 1, "only the real pkg, and the walk terminated");
         assert!(out[0].ends_with("game.pkg"));
+    }
+
+    #[test]
+    fn speed_blend_converges_and_decays() {
+        // 1 MiB/s instantaneous rate, sampled every second.
+        let s1 = blend_speed(0, 1_048_576, 1.0);
+        assert!(
+            (s1 as i64 - 419_430).abs() < 4,
+            "first sample = 40% of 1 MiB/s, got {s1}"
+        );
+        let s2 = blend_speed(s1, 1_048_576, 1.0);
+        assert!(
+            s2 > 600_000 && s2 < 1_100_000,
+            "converges toward 1 MiB/s, got {s2}"
+        );
+        // Traffic stops → the readout decays instead of snapping to zero.
+        let s3 = blend_speed(s2, 0, 1.0);
+        assert!(s3 < s2 && s3 > 0, "decays, got {s3}");
     }
 
     #[test]
