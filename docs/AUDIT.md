@@ -507,3 +507,83 @@ publishes from the repo again.
   scan cap), per-frame search allocations over small queues, and the
   `find_task → task_id 0` degradation path (ends in the existing
   task-gone → Unknown handling).
+
+## 10. Addendum — third full re-audit (v0.0.6)
+
+Date: 2026-11-03. Same method as §9: line-by-line read of every module
+(core + UI) against the protocol facts, plus the mock-backend suite as
+behavioral evidence. The code base as shipped in v0.0.5 is in good shape —
+this round found two real state-machine defects (both fixed with
+regressions) and a handful of edge notes documented below.
+
+### P1 — connecting to another console left the engine in a mixed state (engine)
+
+A successful connect over a *live* console session swapped `console`,
+`client`, `console_status` and the file server to the new machine, but the
+active task's poller kept watching the OLD console through its captured
+old client. Consequences: progress came from the old console while every
+remote control call (pause/resume/stop) and the status chip pointed at the
+new one; and the file-server swap that follows every connect cuts the old
+console's download anyway — so the in-flight item's outcome was unknowable
+either way, yet the UI kept showing live progress as if it were healthy.
+
+Fix: a connect over a live session now applies the Disconnect semantics
+before switching (stop poller, mark in-flight items `Unknown` with the
+reconnect hint, never auto-resubmitted). First connects and reconnects
+after an explicit Disconnect are untouched (guarded by `console.is_some()`,
+which is `None` in both). The old console's task is *not* stopped — the
+download keeps running there, exactly like Disconnect.
+Regression: `engine_connecting_elsewhere_parks_inflight_as_unknown`.
+
+### P2 — a user Retry inherited a spent retry budget (queue/engine)
+
+`QueueItem::attempts` only ever grew (transient submit failures increment
+it toward `MAX_SUBMIT_ATTEMPTS`) and was reset nowhere. Once a submit
+cycle had spent the budget — typically "connection refused" while the
+console app was being restarted — every later Retry started with
+`attempts == MAX_SUBMIT_ATTEMPTS - 1`, i.e. **zero** automatic retries:
+the first transient blip failed the item permanently, and only a second
+manual Retry (with the console healthy again) succeeded. The stale v2
+`job_id` of the previous console-side job was carried into the fresh
+attempt the same way (harmless in practice — every consumer pairs it with
+`task_id`, which was reset — but wrong to keep).
+
+Fix: `requeue` resets `attempts`, `job_id` (alongside the existing
+`task_id`/`progress`/`error` reset), and a successful submit acceptance
+resets `attempts` — the cycle that spent it is over.
+Regression: `requeue_resets_the_previous_attempts_bookkeeping`.
+
+### Reviewed and intentionally left unchanged
+
+- **Cross-console task-id collision in reconcile** (theoretical): when
+  re-attaching `Unknown` items, the v2 matcher prefers `bgft_task_id` /
+  remembered job id before content id. Two different consoles can
+  independently assign the same small task id, so a user who disconnects
+  from console A mid-install and reconnects to console B *with a live job
+  carrying the same id* could see a false match. Requires two consoles
+  with colliding ids and deliberate mid-install switching; fixing it
+  (content-id-first matching) would break the more common same-console
+  re-attach. Documented instead.
+- **`update::http_client()` uses `expect()`** on the update-check thread:
+  if the reqwest client could not be built (essentially impossible with
+  the bundled rustls roots — no native cert loading), the thread would
+  panic and the checker's `busy` flag would stay true forever (the UI
+  repaints at 150 ms; nothing else breaks). The same file already honors
+  "always deliver a result" for thread-spawn/runtime failures; closing
+  this last gap would mean widening the public API for a practically
+  unreachable path. Left as-is.
+- **Legacy reconcile's "will be resumed after the monitored item
+  finishes" hint** (attached-second-item branch): nothing auto-resumes
+  that item later — the user must press Resume. The branch is only
+  reachable with 2+ live tasks, which the single-active-task invariant
+  makes near-impossible (a hand-edited/ancient queue.json could). Wording
+  note only.
+- The 4 Hz snapshot clone, per-frame search allocations, and
+  `add_paths`' O(n²) dedup over the 2000-file cap — all re-measured, all
+  bounded and irrelevant at realistic queue sizes (see §3/§9).
+
+### Verification
+
+- 94/94 tests green (`cargo test --workspace`), including the two new
+  regressions; `cargo fmt --check` and `cargo clippy --workspace
+  --all-targets -D warnings` clean; `unsafe_code = "deny"` unchanged.
