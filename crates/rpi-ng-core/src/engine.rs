@@ -311,6 +311,39 @@ impl EngineInner {
         self.server.is_some()
     }
 
+    /// Mark in-flight items `Unknown` (outcome unobservable from here) and
+    /// persist. Shared by an explicit `Disconnect` and by a successful
+    /// connect that switches consoles: both stop observing the console that
+    /// owns those tasks. Paused items keep their task id and stay resumable.
+    /// Returns how many items were parked.
+    fn park_inflight_unknown(&mut self) -> usize {
+        let inflight: Vec<ItemId> = self
+            .queue
+            .items()
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.state,
+                    ItemState::Submitting | ItemState::Transferring | ItemState::Installing
+                )
+            })
+            .map(|i| i.id)
+            .collect();
+        for id in &inflight {
+            if let Some(it) = self.queue.get_mut(*id) {
+                it.state = ItemState::Unknown;
+                it.error = Some(
+                    "Connection closed while this item was in flight — the outcome is unknown; reconnect to re-attach, then verify on the console".into(),
+                );
+                it.updated_at = unix_ms();
+            }
+        }
+        if !inflight.is_empty() {
+            self.persist_queue();
+        }
+        inflight.len()
+    }
+
     // -- command handling ---------------------------------------------------
 
     async fn handle(&mut self, cmd: Command) {
@@ -425,35 +458,11 @@ impl EngineInner {
                 // them Unknown (never auto-resubmitted); reconcile() re-attaches
                 // to console tasks on the next connect. Paused items keep their
                 // task id and are resumable explicitly.
-                let inflight: Vec<ItemId> = self
-                    .queue
-                    .items()
-                    .iter()
-                    .filter(|i| {
-                        matches!(
-                            i.state,
-                            ItemState::Submitting | ItemState::Transferring | ItemState::Installing
-                        )
-                    })
-                    .map(|i| i.id)
-                    .collect();
-                for id in &inflight {
-                    if let Some(it) = self.queue.get_mut(*id) {
-                        it.state = ItemState::Unknown;
-                        it.error = Some(
-                            "Connection closed while this item was in flight — the outcome is unknown; reconnect to re-attach, then verify on the console".into(),
-                        );
-                        it.updated_at = unix_ms();
-                    }
-                }
-                if !inflight.is_empty() {
-                    self.persist_queue();
+                let parked = self.park_inflight_unknown();
+                if parked > 0 {
                     self.log(
                         LogLevel::Warn,
-                        format!(
-                            "Disconnected with {} in-flight item(s) marked unknown",
-                            inflight.len()
-                        ),
+                        format!("Disconnected with {parked} in-flight item(s) marked unknown"),
                     );
                 } else {
                     self.log(LogLevel::Info, "Disconnected");
@@ -647,6 +656,26 @@ impl EngineInner {
             }
             Internal::ProbeDone { addr, result } => match result {
                 Ok(target) => {
+                    // A successful connect while another console session is
+                    // still live is an implicit disconnect of that session.
+                    // Without this, the poller kept watching the OLD console
+                    // (it holds the old client) while every remote control
+                    // call and the status chip pointed at the NEW one — and
+                    // the file-server swap below cuts the old console's
+                    // download anyway. First connects and reconnects after an
+                    // explicit Disconnect are unaffected (no live session).
+                    if self.console.is_some() {
+                        self.stop_poller();
+                        let parked = self.park_inflight_unknown();
+                        if parked > 0 {
+                            self.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "Switched consoles with {parked} in-flight item(s) — outcome unknown; reconnect to the previous console to re-attach"
+                                ),
+                            );
+                        }
+                    }
                     self.console = Some(target.clone());
                     self.console_status = ConsoleStatus::Connected;
                     self.client = Some(RpiClient::new(addr, Duration::from_secs(15)));
@@ -738,6 +767,10 @@ impl EngineInner {
                             it.job_id = job_id;
                             it.console_title = resp.title.clone();
                             it.state = ItemState::Transferring;
+                            // The submit cycle succeeded (possibly after
+                            // transient retries); a later failure + Retry
+                            // must start with a full retry budget again.
+                            it.attempts = 0;
                             it.updated_at = unix_ms();
                         }
                         self.poll_failures = 0;

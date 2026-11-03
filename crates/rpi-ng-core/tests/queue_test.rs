@@ -89,6 +89,40 @@ fn requeue_and_clear_finished() {
 }
 
 #[test]
+fn requeue_resets_the_previous_attempts_bookkeeping() {
+    // A submit cycle that exhausted its transient-retry budget (attempts
+    // grows to MAX_SUBMIT_ATTEMPTS - 1) used to leak into every later Retry:
+    // the requeued item then had *zero* automatic submit retries left, so the
+    // first transient blip failed it permanently. The stale v2 job id of the
+    // old console-side job must go too.
+    let tmp = tempfile::tempdir().unwrap();
+    let a = write_pkg(tmp.path(), "A.pkg", 5);
+    let mut q = Queue::default();
+    let (added, _) = q.add_paths(vec![a]);
+    let id = added[0];
+
+    {
+        let item = q.get_mut(id).unwrap();
+        item.state = ItemState::Failed;
+        item.error = Some("network error".into());
+        item.task_id = Some(7);
+        item.job_id = Some(3);
+        item.attempts = 2; // what a fully-spent submit cycle leaves behind
+    }
+    assert!(q.requeue(id));
+    let item = q.get(id).unwrap();
+    assert_eq!(item.state, ItemState::Queued);
+    assert_eq!(item.attempts, 0, "a fresh attempt gets a full retry budget");
+    assert_eq!(
+        item.job_id, None,
+        "the old console job id must not carry over"
+    );
+    assert_eq!(item.task_id, None);
+    assert!(item.error.is_none());
+    assert!(item.progress.is_none());
+}
+
+#[test]
 fn move_item_bounds() {
     let tmp = tempfile::tempdir().unwrap();
     let paths: Vec<_> = ["A.pkg", "B.pkg", "C.pkg"]
