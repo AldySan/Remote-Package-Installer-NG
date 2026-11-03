@@ -1932,6 +1932,102 @@ async fn engine_disconnect_marks_inflight_unknown_and_reattaches() {
     handle.shutdown();
 }
 
+/// Connecting to a second console while a transfer is active used to leave
+/// the engine in a mixed state: the poller kept watching the OLD console
+/// (it holds the old client) while every remote control call and the status
+/// chip pointed at the NEW one — and the file-server swap that follows a
+/// connect cuts the old console's download anyway. A successful connect over
+/// a live session must park in-flight items as Unknown (same semantics as an
+/// explicit Disconnect), without stopping the old console's task.
+#[tokio::test]
+async fn engine_connecting_elsewhere_parks_inflight_as_unknown() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSA44444_00-SWITCHCONSOLE.pkg",
+        "UP0001-CUSA44444_00-SWITCHCONSOLE",
+    );
+
+    let mock_a = MockConsole::start(Dialect::Strict).await;
+    // Slow advance: the item must still be Transferring when we switch.
+    mock_a.state.lock().unwrap().step = 4096;
+    let mock_b = MockConsole::start(Dialect::Strict).await;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(25),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock_a.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(20),
+    )
+    .await;
+    let item_id = snap.items[0].id;
+
+    // Connect to console B *without* an explicit Disconnect.
+    handle.send(Command::Connect(mock_b.addr));
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            ) && s
+                .items
+                .iter()
+                .any(|i| i.id == item_id && i.state == ItemState::Unknown)
+        },
+        Duration::from_secs(20),
+    )
+    .await;
+    let item = snap.items.iter().find(|i| i.id == item_id).unwrap();
+    assert!(
+        item.task_id.is_some(),
+        "the console task id is kept for a later re-attach"
+    );
+    assert!(
+        item.error.is_some(),
+        "an unknown outcome needs a user-facing hint"
+    );
+
+    // The old console's download was never cancelled (only unobserved), and
+    // the new console saw no install traffic of its own.
+    assert!(
+        mock_a.stopped_tasks().is_empty(),
+        "switching consoles must not stop the old console's task"
+    );
+    assert!(
+        mock_b.installs().is_empty(),
+        "the parked item must not be auto-resubmitted to the new console"
+    );
+    handle.shutdown();
+}
+
 /// A backend that accepts the install but answers without a task id (some
 /// v3.x forks) must surface as Unknown — an untrackable outcome the user
 /// verifies — not as Failed, which would claim the install never happened.
