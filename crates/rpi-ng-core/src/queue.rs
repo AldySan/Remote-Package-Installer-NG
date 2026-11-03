@@ -286,6 +286,14 @@ impl Queue {
         item.state = ItemState::Queued;
         item.error = None;
         item.task_id = None;
+        // A fresh attempt must not inherit the previous attempt's leftovers:
+        // `attempts` only ever grows during a submit cycle, so keeping it
+        // meant a user-retried item got *zero* automatic submit retries once
+        // one cycle had exhausted the budget (every transient blip then went
+        // straight to Failed). The v2 job id belongs to the old console-side
+        // job, not to the attempt about to be created.
+        item.job_id = None;
+        item.attempts = 0;
         item.progress = None;
         item.updated_at = unix_ms();
         true
