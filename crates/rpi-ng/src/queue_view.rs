@@ -1,4 +1,13 @@
-//! Queue view: toolbar, virtualized item list with live progress.
+//! Queue view: toolbar, item list with live progress.
+//!
+//! The list is a plain scroll area — rows have variable heights (error
+//! lines, wrapping titles, per-state action rows), and egui's virtualized
+//! `show_rows` contractually requires a FIXED row height: rendering 88-101px
+//! rows into 74px slots made every row overlap the next. Measured headlessly
+//! during the fourth audit round: a plain row is ~88px, one with an error
+//! line ~101px. egui lays out thousands of widgets per frame comfortably,
+//! and the log panel already renders up to 500 entries unvirtualized, so the
+//! simplicity is the right trade here.
 
 use eframe::egui;
 
@@ -11,8 +20,6 @@ use crate::{
     app::{App, queue_summary, state_color},
     dialogs, fmt,
 };
-
-const ROW_HEIGHT: f32 = 74.0;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toolbar(app, ui);
@@ -32,17 +39,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .collect();
 
     if indices.is_empty() {
-        empty_state(ui);
+        if app.snapshot.items.is_empty() {
+            empty_state(ui);
+        } else {
+            // A filter that hides everything is not an empty queue: saying
+            // "drop files here" while items exist looks like they vanished.
+            no_matches(ui, &needle);
+        }
         return;
     }
 
-    // Virtualized list: only visible rows are laid out — hundreds of items
-    // stay responsive.
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, indices.len(), |ui, range| {
-            for idx in range {
-                let item = &app.snapshot.items[indices[idx]];
+        .show(ui, |ui| {
+            for idx in indices {
+                let item = &app.snapshot.items[idx];
                 item_row(app, ui, item);
                 ui.separator();
             }
@@ -185,7 +196,10 @@ fn server_strip(app: &mut App, ui: &mut egui::Ui) {
                 )
                 .clicked()
             {
-                app.server_checker.kick(server.bind.port());
+                // Probe the actual bound address: the server usually binds a
+                // specific interface (the one that can reach the console),
+                // which a loopback probe would wrongly report as dead.
+                app.server_checker.kick(server.bind);
             }
             if busy {
                 ui.add(egui::Spinner::new());
@@ -237,6 +251,26 @@ fn empty_state(ui: &mut egui::Ui) {
             ui.label(egui::RichText::new("…or use “Add PKG files…” / “Add folder…” above.").weak());
             // The live file-server strip above the list already shows the
             // serving URL — no need to repeat it here.
+            ui.add_space(20.0);
+        });
+    });
+}
+
+/// The queue is not empty — the search box is hiding everything.
+fn no_matches(ui: &mut egui::Ui, needle: &str) {
+    let frame = egui::Frame::new()
+        .fill(ui.style().visuals.faint_bg_color)
+        .inner_margin(egui::Margin::same(28))
+        .corner_radius(10.0);
+    frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.vertical_centered(|ui| {
+            ui.add_space(20.0);
+            ui.heading("No packages match this search");
+            ui.label(egui::RichText::new(format!("Nothing matches “{needle}”.")));
+            ui.label(
+                egui::RichText::new("Clear the search box to see the whole queue again.").weak(),
+            );
             ui.add_space(20.0);
         });
     });

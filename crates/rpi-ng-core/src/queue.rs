@@ -204,6 +204,7 @@ impl Queue {
                 state: ItemState::Queued,
                 error: None,
                 task_id: None,
+                task_owner: None,
                 job_id: None,
                 console_title: None,
                 progress: None,
@@ -293,6 +294,7 @@ impl Queue {
         // straight to Failed). The v2 job id belongs to the old console-side
         // job, not to the attempt about to be created.
         item.job_id = None;
+        item.task_owner = None;
         item.attempts = 0;
         item.progress = None;
         item.updated_at = unix_ms();

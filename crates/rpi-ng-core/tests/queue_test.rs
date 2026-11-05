@@ -188,3 +188,44 @@ fn stats_count_states() {
     assert_eq!(stats.cancelled, 1);
     assert_eq!(stats.pending, 1);
 }
+
+/// Queue files written before the `task_owner` field existed (v0.0.6 and
+/// earlier) must keep loading: the field defaults to `None`, which the
+/// engine treats permissively so legacy queues re-attach exactly as before.
+#[test]
+fn legacy_queue_doc_without_task_owner_loads() {
+    let doc = r#"{
+        "next_item": 1,
+        "next_part": 1,
+        "items": [
+            {
+                "id": 0,
+                "parts": [
+                    {
+                        "id": 0,
+                        "path": "/tmp/legacy.pkg",
+                        "file_name": "legacy.pkg",
+                        "size": 10,
+                        "part_index": null
+                    }
+                ],
+                "state": "Unknown",
+                "error": null,
+                "task_id": 7,
+                "job_id": null,
+                "console_title": null,
+                "progress": null,
+                "attempts": 0,
+                "added_at": 1,
+                "updated_at": 1
+            }
+        ]
+    }"#;
+    let q = Queue::from_json(doc).expect("legacy queue doc loads");
+    let item = q.get(0).unwrap();
+    assert_eq!(item.task_id, Some(7));
+    assert_eq!(
+        item.task_owner, None,
+        "missing owner defaults to permissive"
+    );
+}

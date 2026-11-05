@@ -69,7 +69,12 @@ fn status_line(app: &mut App, ui: &mut egui::Ui) {
                 app.discovered.len()
             ));
         }
-        if ui.button("Scan again").clicked() {
+        // One sweep at a time (the engine also guards this): a second
+        // click while scanning would stack another full subnet probe.
+        if ui
+            .add_enabled(!app.discovery_running, egui::Button::new("Scan again"))
+            .clicked()
+        {
             app.discovered.clear();
             app.discovery_running = true;
             app.send(rpi_ng_core::Command::Discover);
@@ -98,6 +103,10 @@ fn candidates(app: &mut App, ui: &mut egui::Ui) {
     if app.discovered.is_empty() {
         return;
     }
+    // Double-clicking Connect while a probe is already running just stacks
+    // probe work and restarts the session churn; the chip up top already
+    // says "Connecting…".
+    let probing = matches!(app.snapshot.console.status, ConsoleStatus::Probing);
     ui.group(|ui| {
         ui.label(egui::RichText::new("Discovered consoles").strong());
         for cand in app.discovered.clone() {
@@ -114,7 +123,10 @@ fn candidates(app: &mut App, ui: &mut egui::Ui) {
                         .small()
                         .weak(),
                 );
-                if ui.button("Connect").clicked() {
+                if ui
+                    .add_enabled(!probing, egui::Button::new("Connect"))
+                    .clicked()
+                {
                     app.send(rpi_ng_core::Command::Connect(cand.addr));
                 }
             });
@@ -127,12 +139,16 @@ fn remembered(app: &mut App, ui: &mut egui::Ui) {
     if remembered.is_empty() {
         return;
     }
+    let probing = matches!(app.snapshot.console.status, ConsoleStatus::Probing);
     ui.group(|ui| {
         ui.label(egui::RichText::new("Previously used").strong());
         for addr in remembered {
             ui.horizontal(|ui| {
                 ui.label(addr.to_string());
-                if ui.small_button("Connect").clicked() {
+                if ui
+                    .add_enabled(!probing, egui::Button::new("Connect").small())
+                    .clicked()
+                {
                     app.send(rpi_ng_core::Command::Connect(addr));
                 }
             });
@@ -141,6 +157,7 @@ fn remembered(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn manual(app: &mut App, ui: &mut egui::Ui) {
+    let probing = matches!(app.snapshot.console.status, ConsoleStatus::Probing);
     ui.group(|ui| {
         ui.label(egui::RichText::new("Manual address (fallback)").strong());
         ui.horizontal(|ui| {
@@ -149,7 +166,7 @@ fn manual(app: &mut App, ui: &mut egui::Ui) {
                 .desired_width(240.0);
             ui.add(edit);
             let parsed = parse_addr(&app.manual_addr);
-            let enabled = parsed.is_some();
+            let enabled = parsed.is_some() && !probing;
             if ui
                 .add_enabled(enabled, egui::Button::new("Connect"))
                 .on_disabled_hover_text("Enter a valid IP address first")
