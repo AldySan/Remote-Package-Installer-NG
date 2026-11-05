@@ -21,11 +21,11 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
     };
     // Values the window body needs from `app` without fighting the draft
     // borrow (the closure only captures `draft` + these copies).
-    let server_port = app.snapshot.server.as_ref().map(|s| s.bind.port());
+    let server_bind = app.snapshot.server.as_ref().map(|s| s.bind);
     let check_busy = app.server_checker.busy;
     let check_result = app.server_check_result.clone();
     let mut save = false;
-    let mut kick_check: Option<u16> = None;
+    let mut kick_check: Option<std::net::SocketAddr> = None;
     egui::Window::new("Settings")
         .open(open)
         .collapsible(false)
@@ -70,7 +70,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                             "Check File Server"
                         };
                         if ui
-                            .add_enabled(server_port.is_some(), egui::Button::new(label))
+                            .add_enabled(server_bind.is_some(), egui::Button::new(label))
                             .on_disabled_hover_text(
                                 "The file server starts when you connect to a console — \
                                  connect first, then check",
@@ -82,7 +82,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                             )
                             .clicked()
                         {
-                            kick_check = server_port;
+                            kick_check = server_bind;
                         }
                         if check_busy {
                             ui.add(egui::Spinner::new());
@@ -199,8 +199,10 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
         app.settings = draft.clone();
         app.send(rpi_ng_core::Command::SetSettings(Box::new(draft)));
     }
-    if let Some(port) = kick_check {
-        app.server_checker.kick(port);
+    if let Some(bind) = kick_check {
+        // Probe the bound address — the server usually binds a specific
+        // interface, which a loopback probe would wrongly report as dead.
+        app.server_checker.kick(bind);
     }
 }
 

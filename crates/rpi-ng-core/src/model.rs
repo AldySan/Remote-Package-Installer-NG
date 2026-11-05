@@ -291,6 +291,12 @@ pub struct QueueItem {
     pub error: Option<String>,
     /// Console-assigned task id once an install request succeeded.
     pub task_id: Option<TaskId>,
+    /// Console the `task_id`/`job_id` were learned from — they are only
+    /// meaningful *on that console* (ids are console-scoped and collide
+    /// across machines), so remote ops must not be aimed at a different one.
+    /// `None` = pre-field queue file or unknown origin (legacy permissive).
+    #[serde(default)]
+    pub task_owner: Option<SocketAddr>,
     /// Console-assigned v2 job id (NextGen-class backends); used for the
     /// per-job lifecycle endpoints instead of the task id.
     #[serde(default)]

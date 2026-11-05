@@ -8,6 +8,7 @@
 //! machines is blocking" (firewall, subnet, AP isolation).
 
 use std::{
+    net::SocketAddr,
     sync::mpsc::{Receiver, Sender, channel},
     time::Duration,
 };
@@ -34,8 +35,9 @@ impl ServerChecker {
         }
     }
 
-    /// Start a background probe of `port` unless one is already running.
-    pub fn kick(&mut self, port: u16) {
+    /// Start a background probe of the server's bound address unless one is
+    /// already running.
+    pub fn kick(&mut self, bind: SocketAddr) {
         if self.busy {
             return;
         }
@@ -45,7 +47,7 @@ impl ServerChecker {
         let build = std::thread::Builder::new().name("rpi-ng-server-check".into());
         if build
             .spawn(move || {
-                let result = fileserver::self_check(port, TIMEOUT);
+                let result = fileserver::self_check(bind, TIMEOUT);
                 let _ = tx.send(result);
             })
             .is_err()

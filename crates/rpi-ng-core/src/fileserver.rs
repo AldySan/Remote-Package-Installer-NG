@@ -463,14 +463,27 @@ pub enum ServerCheck {
     Error(String),
 }
 
-/// Probe the local file server on `port` over loopback, `HEAD`-ing an
-/// unregistered URL. Sync + std-only on purpose: the UI calls it from a
+/// Probe the local file server on `bind` (its real bound address), `HEAD`-ing
+/// an unregistered URL. Sync + std-only on purpose: the UI calls it from a
 /// plain background thread (same pattern as the update checker).
-pub fn self_check(port: u16, timeout: Duration) -> ServerCheck {
+///
+/// The server normally binds a *specific* interface IP (the one that can
+/// reach the console) — probing loopback there would be refused by design,
+/// so the probe targets the bound address itself. A server bound to all
+/// interfaces (`0.0.0.0`) is probed via loopback, the one address that is
+/// always local.
+pub fn self_check(bind: SocketAddr, timeout: Duration) -> ServerCheck {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    let addr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+    let addr = if bind.ip().is_unspecified() {
+        SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            bind.port(),
+        )
+    } else {
+        bind
+    };
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(s) => s,
         // Refused/reset = nothing (usable) is listening there.
@@ -579,7 +592,10 @@ mod tests {
         // instead of answering RST (same platform variance as commit 95ef0f4);
         // both outcomes agree on what the user cares about: nothing usable
         // answered there.
-        match self_check(port, Duration::from_millis(750)) {
+        match self_check(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(750),
+        ) {
             ServerCheck::NotRunning | ServerCheck::NoAnswer => {}
             other => panic!("expected NotRunning/NoAnswer, got {other:?}"),
         }
@@ -601,7 +617,7 @@ mod tests {
         // below so the id stays deterministic; in-app, any status answer —
         // even 200 for a real id — means "alive".)
         assert_eq!(
-            self_check(server.bind.port(), Duration::from_millis(750)),
+            self_check(server.bind, Duration::from_millis(750)),
             ServerCheck::Responded(404)
         );
 
