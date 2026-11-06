@@ -77,18 +77,33 @@ fn matches_search(needle: &str, item: &QueueItem) -> bool {
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let busy = app.snapshot.engine_busy;
+        // One native dialog at a time: opening a second one would replace
+        // `app.dialog`, dropping the first dialog's receiver — the user's
+        // confirmed pick would then be discarded without any feedback (the
+        // native dialog does not block the main window, so both buttons stay
+        // clickable while it is open).
+        let dialog_open = app.dialog.is_some();
+        let can_add = !busy && !dialog_open;
+        // The disabled hover must not lie about *why* the button is off.
+        let why = if dialog_open {
+            "Close the open file dialog first"
+        } else {
+            "Wait for the current operation to finish"
+        };
         let any_active = app.snapshot.items.iter().any(|i| i.state.is_active());
 
         if ui
-            .add_enabled(!busy, egui::Button::new("Add PKG files…"))
+            .add_enabled(can_add, egui::Button::new("Add PKG files…"))
             .on_hover_text("Select one or more .pkg files")
+            .on_disabled_hover_text(why)
             .clicked()
         {
             app.dialog = Some(dialogs::pick_pkg_files());
         }
         if ui
-            .add_enabled(!busy, egui::Button::new("Add folder…"))
+            .add_enabled(can_add, egui::Button::new("Add folder…"))
             .on_hover_text("Scan a folder for packages")
+            .on_disabled_hover_text(why)
             .clicked()
         {
             app.dialog = Some(dialogs::pick_folder());

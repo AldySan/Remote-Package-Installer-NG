@@ -1969,6 +1969,12 @@ impl EngineInner {
 
     async fn shutdown(&mut self) {
         self.running = false;
+        // Flush state BEFORE the best-effort remote stop: that call can hang
+        // for the client's full timeout (15 s) while `EngineHandle::shutdown`
+        // hard-stops the runtime after 5 s — persisting afterwards could be
+        // skipped entirely on a black-holed console. All transitions already
+        // persist immediately, so this only secures the final flush.
+        self.persist_queue();
         // Best-effort console-side cleanup with a short timeout.
         if let Some(active) = self.active.take() {
             let _ = active.poll_cancel.send(true);
@@ -1977,7 +1983,6 @@ impl EngineInner {
         if let Some(server) = self.server.take() {
             server.shutdown();
         }
-        self.persist_queue();
         self.log(LogLevel::Info, "Engine shut down; state flushed");
     }
 }
