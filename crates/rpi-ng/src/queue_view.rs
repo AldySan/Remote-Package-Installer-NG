@@ -21,6 +21,94 @@ use crate::{
     dialogs, fmt,
 };
 
+/// Which per-item action buttons a queue row offers, derived ONLY from the
+/// item state — the exact mapping the UI renders. Extracted from the row
+/// layout code so the "which button for which state" contract is testable
+/// without a GUI harness (this is where "button does nothing" bugs live).
+///
+/// Note the deliberate asymmetry carried over from the layout: pausing an
+/// active item pauses the WHOLE queue (one console task at a time), while
+/// resuming is per-item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowActions {
+    /// "Pause" — pauses the whole queue (only while this item is active).
+    pub pause: bool,
+    /// "Resume" — resumes just this item (only while paused).
+    pub resume_item: bool,
+    /// "Mark completed" — outcome unknown, user confirms it finished.
+    pub mark_completed: bool,
+    /// "Retry" — requeue for a fresh attempt.
+    pub retry: bool,
+    /// "Remove" — delete from the queue (never while active).
+    pub remove: bool,
+    /// "Cancel" — stop the in-flight install (only while active).
+    pub cancel: bool,
+    /// "Up" — reorder (never while active).
+    pub move_up: bool,
+    /// "Down" — reorder (never while active).
+    pub move_down: bool,
+}
+
+impl RowActions {
+    pub(crate) fn for_state(state: ItemState) -> Self {
+        let active = state.is_active();
+        Self {
+            pause: active,
+            resume_item: state == ItemState::Paused,
+            mark_completed: state == ItemState::Unknown,
+            retry: state.is_finished() || state == ItemState::Unknown,
+            remove: !active,
+            cancel: active,
+            move_up: !active,
+            move_down: !active,
+        }
+    }
+}
+
+/// Toolbar button enablement, derived from engine/busy state and the queue —
+/// the exact contract the toolbar renders (plus the hover reason shown when
+/// Add is disabled). Extracted for the same reason as [`RowActions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ToolbarState {
+    /// "Add PKG files…" / "Add folder…" enabled.
+    pub can_add: bool,
+    /// Why Add is disabled (already accounts for which gate is blocking).
+    pub add_disabled_reason: &'static str,
+    /// "Start queue" enabled (nothing running, engine idle).
+    pub can_start: bool,
+    /// Label swaps to "Queue running" while anything is active.
+    pub start_label: &'static str,
+    /// "Pause" enabled.
+    pub can_pause: bool,
+    /// "Resume" enabled (a paused item exists).
+    pub can_resume: bool,
+    /// "Clear finished" enabled.
+    pub can_clear_finished: bool,
+}
+
+impl ToolbarState {
+    pub(crate) fn derive(busy: bool, dialog_open: bool, items: &[QueueItem]) -> Self {
+        let any_active = items.iter().any(|i| i.state.is_active());
+        Self {
+            can_add: !busy && !dialog_open,
+            add_disabled_reason: if dialog_open {
+                "Close the open file dialog first"
+            } else {
+                "Wait for the current operation to finish"
+            },
+            can_start: !any_active && !busy,
+            start_label: if any_active {
+                "Queue running"
+            } else {
+                "Start queue"
+            },
+            can_pause: any_active,
+            can_resume: items.iter().any(|i| i.state == ItemState::Paused),
+            can_clear_finished: items.iter().any(|i| i.state.is_finished()),
+        }
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toolbar(app, ui);
     server_strip(app, ui);
@@ -76,77 +164,53 @@ fn matches_search(needle: &str, item: &QueueItem) -> bool {
 
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        let busy = app.snapshot.engine_busy;
-        // One native dialog at a time: opening a second one would replace
-        // `app.dialog`, dropping the first dialog's receiver — the user's
-        // confirmed pick would then be discarded without any feedback (the
-        // native dialog does not block the main window, so both buttons stay
-        // clickable while it is open).
-        let dialog_open = app.dialog.is_some();
-        let can_add = !busy && !dialog_open;
-        // The disabled hover must not lie about *why* the button is off.
-        let why = if dialog_open {
-            "Close the open file dialog first"
-        } else {
-            "Wait for the current operation to finish"
-        };
-        let any_active = app.snapshot.items.iter().any(|i| i.state.is_active());
+        let tb = ToolbarState::derive(
+            app.snapshot.engine_busy,
+            app.dialog.is_some(),
+            &app.snapshot.items,
+        );
 
         if ui
-            .add_enabled(can_add, egui::Button::new("Add PKG files…"))
+            .add_enabled(tb.can_add, egui::Button::new("Add PKG files…"))
             .on_hover_text("Select one or more .pkg files")
-            .on_disabled_hover_text(why)
+            .on_disabled_hover_text(tb.add_disabled_reason)
             .clicked()
         {
             app.dialog = Some(dialogs::pick_pkg_files());
         }
         if ui
-            .add_enabled(can_add, egui::Button::new("Add folder…"))
+            .add_enabled(tb.can_add, egui::Button::new("Add folder…"))
             .on_hover_text("Scan a folder for packages")
-            .on_disabled_hover_text(why)
+            .on_disabled_hover_text(tb.add_disabled_reason)
             .clicked()
         {
             app.dialog = Some(dialogs::pick_folder());
         }
         ui.separator();
 
-        let start_label = if any_active {
-            "Queue running"
-        } else {
-            "Start queue"
-        };
         if ui
-            .add_enabled(!any_active && !busy, egui::Button::new(start_label))
+            .add_enabled(tb.can_start, egui::Button::new(tb.start_label))
             .on_hover_text("Install queued items in order")
             .clicked()
         {
             app.send(rpi_ng_core::Command::Start);
         }
         if ui
-            .add_enabled(any_active, egui::Button::new("Pause"))
+            .add_enabled(tb.can_pause, egui::Button::new("Pause"))
             .on_hover_text("Pause the active console task and stop auto-advance")
             .clicked()
         {
             app.send(rpi_ng_core::Command::Pause);
         }
         if ui
-            .add_enabled(
-                app.snapshot
-                    .items
-                    .iter()
-                    .any(|i| i.state == ItemState::Paused),
-                egui::Button::new("Resume"),
-            )
+            .add_enabled(tb.can_resume, egui::Button::new("Resume"))
             .clicked()
         {
             app.send(rpi_ng_core::Command::Resume);
         }
         ui.separator();
         if ui
-            .add_enabled(
-                app.snapshot.items.iter().any(|i| i.state.is_finished()),
-                egui::Button::new("Clear finished"),
-            )
+            .add_enabled(tb.can_clear_finished, egui::Button::new("Clear finished"))
             .clicked()
         {
             app.send(rpi_ng_core::Command::ClearFinished);
@@ -362,16 +426,15 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
     }
 
     // Actions.
+    let actions = RowActions::for_state(state);
     ui.horizontal(|ui| {
-        let active = state.is_active();
-        if state == ItemState::Paused {
-            if ui.small_button("Resume").clicked() {
-                app.send(rpi_ng_core::Command::ResumeItem(id));
-            }
-        } else if active && ui.small_button("Pause").clicked() {
+        if actions.resume_item && ui.small_button("Resume").clicked() {
+            app.send(rpi_ng_core::Command::ResumeItem(id));
+        }
+        if actions.pause && ui.small_button("Pause").clicked() {
             app.send(rpi_ng_core::Command::Pause);
         }
-        if state == ItemState::Unknown
+        if actions.mark_completed
             && ui
                 .small_button("Mark completed")
                 .on_hover_text("You verified on the console that it finished")
@@ -379,25 +442,20 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
         {
             app.send(rpi_ng_core::Command::MarkCompleted(id));
         }
-        if (state.is_finished() || state == ItemState::Unknown)
-            && ui.small_button("Retry").clicked()
-        {
+        if actions.retry && ui.small_button("Retry").clicked() {
             app.send(rpi_ng_core::Command::Retry(id));
         }
-        if !active {
-            if ui.small_button("Remove").clicked() {
-                app.send(rpi_ng_core::Command::Remove(id));
-            }
-        } else if ui.small_button("Cancel").clicked() {
+        if actions.remove && ui.small_button("Remove").clicked() {
+            app.send(rpi_ng_core::Command::Remove(id));
+        }
+        if actions.cancel && ui.small_button("Cancel").clicked() {
             app.send(rpi_ng_core::Command::Cancel(id));
         }
-        if !active {
-            if ui.small_button("Up").clicked() {
-                app.send(rpi_ng_core::Command::Move { id, delta: -1 });
-            }
-            if ui.small_button("Down").clicked() {
-                app.send(rpi_ng_core::Command::Move { id, delta: 1 });
-            }
+        if actions.move_up && ui.small_button("Up").clicked() {
+            app.send(rpi_ng_core::Command::Move { id, delta: -1 });
+        }
+        if actions.move_down && ui.small_button("Down").clicked() {
+            app.send(rpi_ng_core::Command::Move { id, delta: 1 });
         }
     });
 }
@@ -447,5 +505,360 @@ fn eta_suffix(p: &ProgressView) -> String {
     match p.eta_sec {
         Some(sec) if sec > 0 => format!(" · {}", fmt::duration(sec)),
         _ => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure UI-state logic tests (no GUI harness needed — these pin the contracts
+// the egui code renders: which rows are visible, which buttons exist).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rpi_ng_core::model::{ContentKind, PartFile, PkgInfo};
+
+    fn item_with(id: u64, state: ItemState) -> QueueItem {
+        QueueItem {
+            id,
+            parts: vec![PartFile {
+                id,
+                path: "/tmp/game.pkg".into(),
+                file_name: "game.pkg".into(),
+                size: 10,
+                part_index: None,
+                pkg: None,
+                invalid_reason: None,
+            }],
+            state,
+            error: None,
+            task_id: None,
+            task_owner: None,
+            job_id: None,
+            console_title: None,
+            progress: None,
+            attempts: 0,
+            added_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn item_with_pkg(
+        id: u64,
+        state: ItemState,
+        title: &str,
+        cid: &str,
+        title_id: &str,
+    ) -> QueueItem {
+        let mut item = item_with(id, state);
+        let part = &mut item.parts[0];
+        part.pkg = Some(PkgInfo {
+            content_id: cid.into(),
+            title_id: Some(title_id.into()),
+            content_kind: ContentKind::Gd,
+            is_patch: false,
+            title: Some(title.into()),
+            app_version: None,
+            package_version: None,
+            category: None,
+            header_size: 0,
+        });
+        item
+    }
+
+    // -- search visibility ("item not showing" bug class) -------------------
+
+    #[test]
+    fn empty_needle_shows_everything() {
+        // The caller passes search.trim().to_lowercase(); an empty or
+        // whitespace-only box must show the whole queue.
+        assert!(matches_search("", &item_with(0, ItemState::Queued)));
+        assert!(matches_search(
+            "   ".trim(),
+            &item_with(1, ItemState::Failed)
+        ));
+    }
+
+    #[test]
+    fn search_matches_title_file_title_id_and_content_id() {
+        let item = item_with_pkg(
+            0,
+            ItemState::Queued,
+            "Red Dead Redemption",
+            "UP0001-CUSA03041_00-REDEMPTION000002",
+            "CUSA03041",
+        );
+        // Parsed metadata wins the display title, but the file name must
+        // still match — users search what they see on disk.
+        assert!(matches_search("red dead", &item), "title match");
+        assert!(matches_search("game.pkg", &item), "file name match");
+        assert!(matches_search("cusa03041", &item), "title id match");
+        assert!(
+            matches_search("up0001-cusa03041", &item),
+            "content id match"
+        );
+        assert!(
+            matches_search("redemption000002", &item),
+            "content id tail match"
+        );
+    }
+
+    #[test]
+    fn search_no_match_is_false_not_panic() {
+        let item = item_with(0, ItemState::Queued);
+        assert!(!matches_search("zzz-not-there", &item));
+        // An unparsed item (pkg: None) must not match on empty fields.
+        assert!(!matches_search("CUSA", &item));
+    }
+
+    // -- per-row action buttons ("button does nothing" bug class) ----------
+
+    #[test]
+    fn row_actions_match_every_state() {
+        // (state, expected RowActions)
+        let cases: Vec<(ItemState, RowActions)> = vec![
+            // Freshly queued: manage freely, nothing to pause or cancel.
+            (
+                ItemState::Queued,
+                RowActions {
+                    pause: false,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: false,
+                    remove: true,
+                    cancel: false,
+                    move_up: true,
+                    move_down: true,
+                },
+            ),
+            // Preparing/Submitting/Transferring/Installing: the engine owns
+            // the item — only whole-queue Pause and per-item Cancel exist.
+            (
+                ItemState::Preparing,
+                RowActions {
+                    pause: true,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: false,
+                    remove: false,
+                    cancel: true,
+                    move_up: false,
+                    move_down: false,
+                },
+            ),
+            (
+                ItemState::Submitting,
+                RowActions {
+                    pause: true,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: false,
+                    remove: false,
+                    cancel: true,
+                    move_up: false,
+                    move_down: false,
+                },
+            ),
+            (
+                ItemState::Transferring,
+                RowActions {
+                    pause: true,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: false,
+                    remove: false,
+                    cancel: true,
+                    move_up: false,
+                    move_down: false,
+                },
+            ),
+            (
+                ItemState::Installing,
+                RowActions {
+                    pause: true,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: false,
+                    remove: false,
+                    cancel: true,
+                    move_up: false,
+                    move_down: false,
+                },
+            ),
+            // Paused: per-item Resume (NOT whole-queue Pause) + management.
+            (
+                ItemState::Paused,
+                RowActions {
+                    pause: false,
+                    resume_item: true,
+                    mark_completed: false,
+                    retry: false,
+                    remove: true,
+                    cancel: false,
+                    move_up: true,
+                    move_down: true,
+                },
+            ),
+            // Completed/Failed/Cancelled/Invalid: only management + Retry.
+            (
+                ItemState::Completed,
+                RowActions {
+                    pause: false,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: true,
+                    remove: true,
+                    cancel: false,
+                    move_up: true,
+                    move_down: true,
+                },
+            ),
+            (
+                ItemState::Failed,
+                RowActions {
+                    pause: false,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: true,
+                    remove: true,
+                    cancel: false,
+                    move_up: true,
+                    move_down: true,
+                },
+            ),
+            (
+                ItemState::Cancelled,
+                RowActions {
+                    pause: false,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: true,
+                    remove: true,
+                    cancel: false,
+                    move_up: true,
+                    move_down: true,
+                },
+            ),
+            (
+                ItemState::Invalid,
+                RowActions {
+                    pause: false,
+                    resume_item: false,
+                    mark_completed: false,
+                    retry: true,
+                    remove: true,
+                    cancel: false,
+                    move_up: true,
+                    move_down: true,
+                },
+            ),
+            // Unknown: user decides the outcome — Mark completed OR Retry.
+            (
+                ItemState::Unknown,
+                RowActions {
+                    pause: false,
+                    resume_item: false,
+                    mark_completed: true,
+                    retry: true,
+                    remove: true,
+                    cancel: false,
+                    move_up: true,
+                    move_down: true,
+                },
+            ),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(RowActions::for_state(state), expected, "state {state:?}");
+        }
+    }
+
+    #[test]
+    fn row_actions_never_mix_cancel_and_remove() {
+        // The pair is mutually exclusive per state: Cancel needs an in-flight
+        // task, Remove must never yank one out from under the engine.
+        for state in [
+            ItemState::Queued,
+            ItemState::Preparing,
+            ItemState::Submitting,
+            ItemState::Transferring,
+            ItemState::Installing,
+            ItemState::Paused,
+            ItemState::Completed,
+            ItemState::Failed,
+            ItemState::Cancelled,
+            ItemState::Invalid,
+            ItemState::Unknown,
+        ] {
+            let a = RowActions::for_state(state);
+            assert_ne!(a.cancel, a.remove, "state {state:?}");
+            assert_eq!(a.cancel, a.pause, "cancel tracks active (pause) state");
+        }
+    }
+
+    // -- toolbar gating -----------------------------------------------------
+
+    #[test]
+    fn toolbar_on_empty_queue() {
+        let tb = ToolbarState::derive(false, false, &[]);
+        assert!(tb.can_add);
+        assert!(tb.can_start);
+        assert_eq!(tb.start_label, "Start queue");
+        assert!(!tb.can_pause);
+        assert!(!tb.can_resume);
+        assert!(!tb.can_clear_finished);
+    }
+
+    #[test]
+    fn toolbar_while_queue_running() {
+        let items = vec![
+            item_with(0, ItemState::Transferring),
+            item_with(1, ItemState::Queued),
+        ];
+        let tb = ToolbarState::derive(false, false, &items);
+        assert!(tb.can_add, "adding while running is allowed");
+        assert!(!tb.can_start, "no double-start");
+        assert_eq!(tb.start_label, "Queue running");
+        assert!(tb.can_pause);
+        assert!(!tb.can_resume);
+    }
+
+    #[test]
+    fn toolbar_with_paused_item() {
+        let items = vec![item_with(0, ItemState::Paused)];
+        let tb = ToolbarState::derive(false, false, &items);
+        assert!(
+            tb.can_start,
+            "start is allowed when only paused items exist"
+        );
+        assert!(!tb.can_pause);
+        assert!(tb.can_resume);
+    }
+
+    #[test]
+    fn toolbar_with_finished_item() {
+        let items = vec![item_with(0, ItemState::Completed)];
+        let tb = ToolbarState::derive(false, false, &items);
+        assert!(tb.can_clear_finished);
+        assert!(!tb.can_pause);
+    }
+
+    #[test]
+    fn toolbar_busy_and_dialog_gates() {
+        // Engine busy: everything that starts work goes off.
+        let tb = ToolbarState::derive(true, false, &[]);
+        assert!(!tb.can_add);
+        assert_eq!(
+            tb.add_disabled_reason,
+            "Wait for the current operation to finish"
+        );
+        assert!(!tb.can_start);
+
+        // A native dialog open: Add must go off AND the disabled hover must
+        // blame the dialog (the one gate the user can actually close).
+        let tb = ToolbarState::derive(false, true, &[]);
+        assert!(!tb.can_add);
+        assert_eq!(tb.add_disabled_reason, "Close the open file dialog first");
+        // Start does not depend on the dialog.
+        assert!(tb.can_start);
     }
 }

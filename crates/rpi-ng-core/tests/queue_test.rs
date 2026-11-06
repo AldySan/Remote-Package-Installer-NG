@@ -229,3 +229,179 @@ fn legacy_queue_doc_without_task_owner_loads() {
         "missing owner defaults to permissive"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Hand-edited queue.json (structural sanitization on load)
+// ---------------------------------------------------------------------------
+
+fn hand_edited_item(id: u64, part_id: u64, path: &str) -> String {
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    format!(
+        r#"{{"id":{id},"parts":[{{"id":{part_id},"path":"{path}","file_name":"{file_name}","size":10,"part_index":null,"pkg":null,"invalid_reason":null}}],
+            "state":"Queued","error":null,"task_id":null,"task_owner":null,"job_id":null,"console_title":null,"progress":null,"attempts":0,"added_at":0,"updated_at":0}}"#
+    )
+}
+
+fn hand_edited_doc(next_item: u64, next_part: u64, items: &[String]) -> String {
+    format!(
+        r#"{{"next_item":{next_item},"next_part":{next_part},"items":[{}]}}"#,
+        items.join(",")
+    )
+}
+
+/// A pristine document — everything the app itself writes — reports zero
+/// repairs. This pins that sanitization never touches normal files.
+#[test]
+fn well_formed_doc_reports_no_repairs() {
+    let doc = hand_edited_doc(
+        3,
+        3,
+        &[
+            hand_edited_item(0, 0, "/tmp/a.pkg"),
+            hand_edited_item(1, 1, "/tmp/b.pkg"),
+            hand_edited_item(2, 2, "/tmp/c.pkg"),
+        ],
+    );
+    let (_, repairs) = Queue::from_json_reported(&doc).unwrap();
+    assert!(repairs.is_empty(), "unexpected repairs: {repairs:?}");
+    assert!(repairs.warnings().is_empty());
+}
+
+/// The user-iseng case: an entry copy-pasted so two items share one id. The
+/// second entry is unreachable (every lookup resolves to the first match) —
+/// its buttons would have acted on the wrong row. Keep the first, drop the
+/// rest, and say so.
+#[test]
+fn duplicate_item_ids_are_dropped_first_wins() {
+    let doc = hand_edited_doc(
+        3,
+        2,
+        &[
+            hand_edited_item(1, 0, "/tmp/real.pkg"),
+            hand_edited_item(2, 1, "/tmp/other.pkg"),
+            // Copy of item 1 with a different file — must disappear.
+            hand_edited_item(1, 1, "/tmp/copy.pkg"),
+        ],
+    );
+    let (q, repairs) = Queue::from_json_reported(&doc).unwrap();
+    assert_eq!(q.items().len(), 2);
+    assert_eq!(repairs.dropped_duplicate_ids, vec![1]);
+    // The survivor of id 1 is the FIRST entry.
+    assert_eq!(q.get(1).unwrap().parts[0].file_name, "real.pkg");
+    assert_eq!(q.get(2).unwrap().parts[0].file_name, "other.pkg");
+    // The warning mentions the id, so the activity panel explains the loss.
+    assert!(
+        repairs
+            .warnings()
+            .iter()
+            .any(|w| w.contains("duplicate item ids 1"))
+    );
+}
+
+/// next_item behind an existing id (user renumbered entries): the next add
+/// would have reused a live id and corrupted that item. Raised past the max.
+#[test]
+fn regressed_next_item_is_raised_past_the_highest_id() {
+    let doc = hand_edited_doc(
+        2, // behind: items already sit at 1..=3
+        3,
+        &[
+            hand_edited_item(1, 0, "/tmp/a.pkg"),
+            hand_edited_item(2, 1, "/tmp/b.pkg"),
+            hand_edited_item(3, 2, "/tmp/c.pkg"),
+        ],
+    );
+    let (q, repairs) = Queue::from_json_reported(&doc).unwrap();
+    assert!(repairs.next_item_repaired);
+
+    // The proof: add a real file and its id must not collide with 1..=3.
+    let tmp = tempfile::tempdir().unwrap();
+    let new = write_pkg(tmp.path(), "New.pkg", 5);
+    let mut q = q;
+    let (added, _) = q.add_paths(vec![new]);
+    assert_eq!(
+        added,
+        vec![4],
+        "fresh ids continue past the highest existing"
+    );
+    // And the new item does not shadow any restored one.
+    assert!(q.get(1).is_some());
+    assert!(q.get(2).is_some());
+    assert!(q.get(3).is_some());
+    assert_eq!(q.items().len(), 4);
+}
+
+/// Same repair for the part counter (observable on the next add).
+#[test]
+fn regressed_next_part_is_raised_past_the_highest_part_id() {
+    let doc = hand_edited_doc(
+        2,
+        0, // behind: parts already sit at 5..=6
+        &[
+            hand_edited_item(1, 5, "/tmp/a.pkg"),
+            hand_edited_item(2, 6, "/tmp/b.pkg"),
+        ],
+    );
+    let (q, repairs) = Queue::from_json_reported(&doc).unwrap();
+    assert!(repairs.next_part_repaired);
+    let tmp = tempfile::tempdir().unwrap();
+    let new = write_pkg(tmp.path(), "New.pkg", 5);
+    let mut q = q;
+    let (added, _) = q.add_paths(vec![new]);
+    let part_id = q.get(added[0]).unwrap().parts[0].id;
+    assert!(
+        part_id > 6,
+        "new part ids continue past the highest existing"
+    );
+}
+
+/// An entry with no files would be submitted as an install with zero URLs;
+/// it stays visible as Invalid (with a reason) instead of vanishing silently.
+#[test]
+fn partless_item_is_marked_invalid_not_dropped() {
+    let doc = r#"{"next_item":2,"next_part":1,"items":[
+        {"id":1,"parts":[],"state":"Queued","error":null,"task_id":null,"task_owner":null,"job_id":null,"console_title":null,"progress":null,"attempts":0,"added_at":0,"updated_at":0}
+    ]}"#;
+    let (q, repairs) = Queue::from_json_reported(doc).unwrap();
+    assert_eq!(q.items().len(), 1, "the entry stays visible");
+    let item = q.get(1).unwrap();
+    assert_eq!(item.state, ItemState::Invalid);
+    assert!(item.error.as_deref().unwrap().contains("no files"));
+    assert_eq!(repairs.invalidated_empty_items, vec![1]);
+}
+
+/// A hand-entered u64::MAX id must not panic in debug builds (overflow) —
+/// the counter saturates instead.
+#[test]
+fn saturating_counter_repair_on_max_id() {
+    let doc = hand_edited_doc(0, 0, &[hand_edited_item(u64::MAX, 0, "/tmp/max.pkg")]);
+    let (q, repairs) = Queue::from_json_reported(&doc).unwrap();
+    assert!(repairs.next_item_repaired);
+    assert_eq!(q.items().len(), 1);
+}
+
+/// Repairs survive a save/load round trip: what the app writes back after
+/// fixing a hand-edited file is pristine (second load reports nothing).
+#[test]
+fn sanitized_queue_round_trips_clean() {
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = hand_edited_doc(
+        1,
+        0,
+        &[
+            hand_edited_item(1, 5, "/tmp/a.pkg"),
+            hand_edited_item(1, 6, "/tmp/dup.pkg"),
+        ],
+    );
+    let (q, repairs) = Queue::from_json_reported(&doc).unwrap();
+    assert!(!repairs.is_empty());
+    q.save_in(Some(tmp.path())).unwrap();
+
+    let (q2, repairs2) = Queue::load_in_reported(Some(tmp.path()));
+    assert!(
+        repairs2.is_empty(),
+        "second load must be pristine: {repairs2:?}"
+    );
+    assert_eq!(q2.items().len(), 1);
+    assert_eq!(q2.items()[0].id, 1);
+}
