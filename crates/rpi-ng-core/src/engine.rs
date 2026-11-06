@@ -173,7 +173,9 @@ pub fn spawn_with(settings: Settings, data_dir: Option<PathBuf>) -> EngineHandle
 // Internals
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+// No `Debug`: the SubmitResult variant carries an `RpiClient`, which has no
+// Debug impl, and this enum is internal plumbing that is never formatted.
+#[allow(clippy::large_enum_variant)]
 enum Internal {
     ScanDone {
         files: Vec<PathBuf>,
@@ -188,6 +190,14 @@ enum Internal {
     DiscoveryDone(Vec<ConsoleCandidate>),
     SubmitResult {
         item: ItemId,
+        /// The client the request went out on, sent back so a late answer
+        /// can still clean up on the console that actually owns the task
+        /// (self.client may point somewhere else by then).
+        client: RpiClient,
+        use_v2: bool,
+        /// Console the request was submitted to (`None` = submitted while
+        /// no console was recorded — defensive only).
+        console: Option<SocketAddr>,
         result: Result<crate::rpi::types::InstallResponse, RpiError>,
     },
     SubmitRetry {
@@ -233,6 +243,8 @@ struct EngineInner {
     /// Consecutive full-transfer samples without a copy phase report.
     copy_phase_stalls: u32,
     scanning: bool,
+    /// A discovery sweep is in flight (guards against stacking sweeps).
+    discovering: bool,
 }
 
 const MAX_SUBMIT_ATTEMPTS: u32 = 3;
@@ -262,6 +274,7 @@ impl EngineInner {
             poll_failures: 0,
             copy_phase_stalls: 0,
             scanning: false,
+            discovering: false,
         }
     }
 
@@ -383,12 +396,17 @@ impl EngineInner {
             Command::Resume => {
                 // Prefer the actively monitored task; otherwise resume the
                 // first paused item that still carries a console task id
-                // (e.g. after a reconnect).
+                // belonging to THIS console (e.g. after a reconnect).
+                let current = self.console.as_ref().map(|c| c.addr);
                 let target = self.active.as_ref().map(|a| a.item_id).or_else(|| {
                     self.queue
                         .items()
                         .iter()
-                        .find(|i| i.state == ItemState::Paused && i.task_id.is_some())
+                        .find(|i| {
+                            i.state == ItemState::Paused
+                                && i.task_id.is_some()
+                                && task_belongs_to(i.task_owner, current)
+                        })
                         .map(|i| i.id)
                 });
                 if let Some(id) = target {
@@ -469,6 +487,14 @@ impl EngineInner {
                 }
             }
             Command::Discover => {
+                // One sweep at a time: the UI already disables "Scan again"
+                // while running, but the startup auto-sweep can overlap a
+                // manual click (or rapid clicks) — stacking subnet sweeps is
+                // pure duplicate probing work.
+                if self.discovering {
+                    return;
+                }
+                self.discovering = true;
                 let settings = self.settings();
                 let tx = self.internal_tx.clone();
                 self.log(LogLevel::Info, "Scanning the local network for consoles…");
@@ -555,22 +581,35 @@ impl EngineInner {
             // locally — including Submitting (v0.0.5 fix: cancelling during
             // the submit window used to be a silent no-op, and the console's
             // late answer then started the task anyway). The late SubmitResult
-            // already best-effort-stops the ghost task.
+            // already best-effort-stops the ghost task on the console it was
+            // sent to.
             && !matches!(item.state, ItemState::Transferring | ItemState::Installing)
         {
             let task_id = item.task_id;
             let job_id = item.job_id;
+            let owner = item.task_owner;
             item.state = ItemState::Cancelled;
             item.updated_at = unix_ms();
             self.persist_queue();
             // A paused/unknown item may still hold a live console task:
-            // clean it up best-effort too.
+            // clean it up best-effort too — but only on the console the task
+            // actually belongs to (ids collide across consoles).
             if let Some(task_id) = task_id {
-                self.stop_remote(task_id, job_id).await;
-                self.log(
-                    LogLevel::Warn,
-                    format!("Cancelled item #{id}; remote stop was best-effort — verify on the console if it still appears"),
-                );
+                if task_belongs_to(owner, self.console.as_ref().map(|c| c.addr)) {
+                    self.stop_remote(task_id, job_id).await;
+                    self.log(
+                        LogLevel::Warn,
+                        format!("Cancelled item #{id}; remote stop was best-effort — verify on the console if it still appears"),
+                    );
+                } else {
+                    self.log(
+                        LogLevel::Warn,
+                        format!(
+                            "Cancelled item #{id}; its console task belongs to another \
+                             console — connect to that one to stop it remotely"
+                        ),
+                    );
+                }
             } else {
                 self.log(LogLevel::Info, format!("Cancelled item #{id}"));
             }
@@ -700,6 +739,7 @@ impl EngineInner {
                 }
             },
             Internal::DiscoveryDone(found) => {
+                self.discovering = false;
                 if found.is_empty() {
                     self.log(LogLevel::Warn, "No consoles found on the local network");
                 } else {
@@ -710,7 +750,13 @@ impl EngineInner {
                 }
                 let _ = self.evt.send(Event::DiscoveryDone(found));
             }
-            Internal::SubmitResult { item, result } => {
+            Internal::SubmitResult {
+                item,
+                client,
+                use_v2,
+                console,
+                result,
+            } => {
                 match result {
                     Ok(resp) => {
                         let task_id = resp.task_id;
@@ -727,17 +773,44 @@ impl EngineInner {
                                 && it.state == ItemState::Unknown
                                 && task_id > 0
                             {
-                                // Disconnected while the request was in flight;
-                                // remember the task id for reconcile().
+                                // Disconnected (or switched consoles) while the
+                                // request was in flight: remember the ids — with
+                                // the console they belong to — for a later
+                                // reconcile on THAT console. The task itself is
+                                // left running: we stopped observing it, not
+                                // controlling it (same semantics as parking an
+                                // in-flight transfer; only an explicit Cancel
+                                // stops a console task).
                                 it.task_id = Some(task_id);
                                 it.job_id = resp.job_id;
+                                it.task_owner = console;
                                 it.updated_at = unix_ms();
                                 self.persist_queue();
-                            }
-                            // Cancelled/removed meanwhile: best-effort cleanup so the
-                            // console does not keep a ghost task.
-                            if task_id > 0 {
-                                self.stop_remote(task_id, resp.job_id).await;
+                                self.log(
+                                    LogLevel::Info,
+                                    format!(
+                                        "Item #{item}: console answered after the disconnect \
+                                         (task {task_id}) — id kept for a later re-attach"
+                                    ),
+                                );
+                            } else if task_id > 0 {
+                                // Cancelled/removed meanwhile: best-effort
+                                // cleanup through the SAME client the request
+                                // went out on. self.client may by now point at
+                                // a different console (or nothing), and firing
+                                // the old task id there could stop an unrelated
+                                // task — ids are console-scoped and collide
+                                // across machines.
+                                stop_via(&client, use_v2, task_id, resp.job_id).await;
+                                self.log(
+                                    LogLevel::Warn,
+                                    format!(
+                                        "Item #{item}: cancelled while the request was in \
+                                         flight — remote stop of task {task_id} was \
+                                         best-effort on the console it was sent to; verify \
+                                         there if it still appears"
+                                    ),
+                                );
                             }
                             return;
                         }
@@ -748,6 +821,7 @@ impl EngineInner {
                             if let Some(it) = self.queue.get_mut(item) {
                                 it.task_id = None;
                                 it.job_id = resp.job_id;
+                                it.task_owner = console;
                                 it.console_title = resp.title.clone();
                                 it.state = ItemState::Completed;
                                 it.error = None;
@@ -765,6 +839,7 @@ impl EngineInner {
                         if let Some(it) = self.queue.get_mut(item) {
                             it.task_id = Some(task_id);
                             it.job_id = job_id;
+                            it.task_owner = console;
                             it.console_title = resp.title.clone();
                             it.state = ItemState::Transferring;
                             // The submit cycle succeeded (possibly after
@@ -991,12 +1066,14 @@ impl EngineInner {
 
     /// Ensure parts are registered, then POST the install request.
     /// v2 backends install through `/api/v2/install`; legacy through
-    /// `/api/install`.
+    /// `/api/install`. The submitting console is recorded with the result so
+    /// a late answer can only ever act on the console it belongs to.
     async fn submit(&mut self, item: ItemId, urls: Vec<String>) {
         let Some(client) = self.client.clone() else {
             return;
         };
         let use_v2 = self.v2_mode();
+        let console = self.console.as_ref().map(|c| c.addr);
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
             let result = if use_v2 {
@@ -1004,7 +1081,13 @@ impl EngineInner {
             } else {
                 client.install_direct(&urls).await
             };
-            let _ = tx.send(Internal::SubmitResult { item, result });
+            let _ = tx.send(Internal::SubmitResult {
+                item,
+                client,
+                use_v2,
+                console,
+                result,
+            });
         });
     }
 
@@ -1139,20 +1222,34 @@ impl EngineInner {
                 // with it is what makes the readout an EMA instead of a
                 // per-poll spike (v0.0.5 fix: the old code blended with
                 // `pv.speed_bps`, which is always 0 in this dialect).
+                //
+                // The sample baseline only advances when the delta is actually
+                // used (or regressed): refreshing it on every poll froze the
+                // readout at 0 for poll intervals below the 400 ms threshold,
+                // because consecutive samples never got far enough apart.
                 let now = Instant::now();
-                if let Some((t0, b0)) = self.last_sample {
-                    let dt = now.duration_since(t0).as_secs_f64();
-                    if dt >= 0.4 && pv.transferred >= b0 {
-                        let prev_bps = self
-                            .queue
-                            .get(item)
-                            .and_then(|i| i.progress)
-                            .map(|p| p.speed_bps)
-                            .unwrap_or(0);
-                        pv.speed_bps = blend_speed(prev_bps, pv.transferred - b0, dt);
+                match self.last_sample {
+                    Some((_, b0)) if pv.transferred < b0 => {
+                        // Counter regressed (task restarted): reseed.
+                        self.last_sample = Some((now, pv.transferred));
                     }
+                    Some((t0, b0)) => {
+                        let dt = now.duration_since(t0).as_secs_f64();
+                        if dt >= 0.4 {
+                            let prev_bps = self
+                                .queue
+                                .get(item)
+                                .and_then(|i| i.progress)
+                                .map(|p| p.speed_bps)
+                                .unwrap_or(0);
+                            pv.speed_bps = blend_speed(prev_bps, pv.transferred - b0, dt);
+                            self.last_sample = Some((now, pv.transferred));
+                        }
+                        // else: too soon after the last used sample — keep the
+                        // older baseline so the delta keeps accumulating.
+                    }
+                    None => self.last_sample = Some((now, pv.transferred)),
                 }
-                self.last_sample = Some((now, pv.transferred));
 
                 let total = pv.total;
                 let transferred = pv.transferred;
@@ -1298,9 +1395,11 @@ impl EngineInner {
         it.updated_at = unix_ms();
         if it.task_id.is_none() && job.bgft_task_id > 0 {
             it.task_id = Some(job.bgft_task_id);
+            it.task_owner = self.console.as_ref().map(|c| c.addr);
         }
         if it.job_id.is_none() {
             it.job_id = Some(job.id);
+            it.task_owner = self.console.as_ref().map(|c| c.addr);
         }
 
         let transferred_done = job.length_total > 0 && job.transferred >= job.length_total;
@@ -1385,7 +1484,11 @@ impl EngineInner {
     /// re-attach a poller when this item is not the monitored one. Honors the
     /// single-active-task invariant.
     async fn resume_item(&mut self, id: ItemId) {
-        let Some((task_id, job_id)) = self.queue.get(id).map(|i| (i.task_id, i.job_id)) else {
+        let Some((task_id, job_id, owner)) = self
+            .queue
+            .get(id)
+            .map(|i| (i.task_id, i.job_id, i.task_owner))
+        else {
             self.log(
                 LogLevel::Warn,
                 format!("Item #{id} has no console task to resume — use Retry instead"),
@@ -1399,6 +1502,18 @@ impl EngineInner {
             );
             return;
         };
+        // Task ids are console-scoped: resuming on a different console would
+        // aim at that console's own (unrelated) task with the same id.
+        if !task_belongs_to(owner, self.console.as_ref().map(|c| c.addr)) {
+            self.log(
+                LogLevel::Warn,
+                format!(
+                    "Item #{id} belongs to a different console — reconnect to that one to \
+                     resume it"
+                ),
+            );
+            return;
+        }
         let is_monitored = self.active.as_ref().map(|a| a.item_id) == Some(id);
         if !is_monitored && self.active.is_some() {
             self.log(
@@ -1461,18 +1576,11 @@ impl EngineInner {
         }
     }
 
-    /// Stop a console-side task or job (best-effort).
+    /// Stop a console-side task or job (best-effort), aiming at the current
+    /// console.
     async fn stop_remote(&mut self, task_id: i64, job_id: Option<i64>) {
         if let Some(client) = self.client.clone() {
-            match (self.v2_mode(), job_id) {
-                (true, Some(job)) => {
-                    let _ = client.v2_job_op(job, "stop").await;
-                }
-                _ => {
-                    let _ = client.stop_task(task_id).await;
-                    let _ = client.unregister_task(task_id).await;
-                }
-            }
+            stop_via(&client, self.v2_mode(), task_id, job_id).await;
         }
     }
 
@@ -1596,8 +1704,12 @@ impl EngineInner {
             id: ItemId,
             task_id: Option<i64>,
             job_id: Option<i64>,
+            /// Console the ids were learned on — they only match jobs on that
+            /// console (ids collide across machines).
+            task_owner: Option<SocketAddr>,
             content_id: Option<String>,
         }
+        let current_addr = self.console.as_ref().map(|c| c.addr);
         let items: Vec<Pending> = self
             .queue
             .items()
@@ -1607,22 +1719,28 @@ impl EngineInner {
                 id: i.id,
                 task_id: i.task_id,
                 job_id: i.job_id,
+                task_owner: i.task_owner,
                 content_id: i.content_id().map(|c| c.to_string()),
             })
             .collect();
 
         let mut attached = false;
         for pending in items {
-            let (id, task_id, job_id, content_id) = (
+            let (id, task_id, job_id, task_owner, content_id) = (
                 pending.id,
                 pending.task_id,
                 pending.job_id,
+                pending.task_owner,
                 pending.content_id,
             );
-            // Match by task id (or remembered job id), then content id.
+            // Match by task id (or remembered job id) — but only when the ids
+            // were learned on THIS console; content ids are console-
+            // independent and stay a valid cross-console match.
+            let ids_match_here = task_belongs_to(task_owner, current_addr);
             let found = jobs.iter().find(|j| {
-                matches!(task_id, Some(t) if t > 0 && j.bgft_task_id == t)
-                    || matches!(job_id, Some(jid) if j.id == jid)
+                ids_match_here
+                    && (matches!(task_id, Some(t) if t > 0 && j.bgft_task_id == t)
+                        || matches!(job_id, Some(jid) if j.id == jid))
             });
             let found = match found {
                 Some(j) => Some(j),
@@ -1650,6 +1768,7 @@ impl EngineInner {
             if let Some(it) = self.queue.get_mut(id) {
                 it.task_id = task_id;
                 it.job_id = Some(job.id);
+                it.task_owner = current_addr;
                 it.error = None;
             }
 
@@ -1742,23 +1861,37 @@ impl EngineInner {
 
     /// Legacy reconcile: find_task per item, one progress probe by task id.
     async fn reconcile_legacy(&mut self) {
-        let items: Vec<(ItemId, Option<i64>, Option<String>, i32)> = self
+        struct Pending {
+            id: ItemId,
+            task_id: Option<i64>,
+            task_owner: Option<SocketAddr>,
+            content_id: Option<String>,
+            sub_type: i32,
+        }
+        let current_addr = self.console.as_ref().map(|c| c.addr);
+        let items: Vec<Pending> = self
             .queue
             .items()
             .iter()
             .filter(|i| matches!(i.state, ItemState::Unknown | ItemState::Paused))
             .filter(|i| i.task_id.is_some() || i.content_id().is_some())
-            .map(|i| {
-                (
-                    i.id,
-                    i.task_id,
-                    i.content_id().map(|c| c.to_string()),
-                    sub_type_for(i),
-                )
+            .map(|i| Pending {
+                id: i.id,
+                task_id: i.task_id,
+                task_owner: i.task_owner,
+                content_id: i.content_id().map(|c| c.to_string()),
+                sub_type: sub_type_for(i),
             })
             .collect();
         let mut attached = false;
-        for (id, task_id, content_id, sub_type) in items {
+        for Pending {
+            id,
+            task_id,
+            task_owner,
+            content_id,
+            sub_type,
+        } in items
+        {
             let Some(client) = self.client.clone() else {
                 return;
             };
@@ -1769,6 +1902,7 @@ impl EngineInner {
                 let tid = found.task_id;
                 if let Some(it) = self.queue.get_mut(id) {
                     it.task_id = Some(tid);
+                    it.task_owner = current_addr;
                     it.error = None;
                 }
                 if attached {
@@ -1789,34 +1923,37 @@ impl EngineInner {
                 );
                 continue;
             }
-            if let Some(tid) = task_id {
-                // Probe progress once by task id — works even when the backend
-                // does not implement find_task.
-                if let Ok(pv) = client.task_progress(tid).await
-                    && pv.raw_error == 0
-                {
-                    if let Some(it) = self.queue.get_mut(id) {
-                        if attached {
-                            it.error = Some(
-                                "Console still reports this task; it will be resumed after the monitored item finishes".into(),
-                            );
-                            continue;
-                        }
-                        it.state = if pv.local_copy_percent >= 100 {
-                            ItemState::Completed
-                        } else if pv.transferred >= pv.total && pv.total > 0 {
-                            ItemState::Installing
-                        } else {
-                            ItemState::Transferring
-                        };
-                        it.progress = Some(pv);
+            // Probe progress once by task id — works even when the backend
+            // does not implement find_task. Only for ids learned on THIS
+            // console: a foreign console's task id would probe (and then
+            // monitor) that console's unrelated task with the same id.
+            if let Some(tid) = task_id
+                && task_belongs_to(task_owner, current_addr)
+                && let Ok(pv) = client.task_progress(tid).await
+                && pv.raw_error == 0
+            {
+                if let Some(it) = self.queue.get_mut(id) {
+                    if attached {
+                        it.error = Some(
+                            "Console still reports this task; it will be resumed after the monitored item finishes".into(),
+                        );
+                        continue;
                     }
-                    if !attached {
-                        self.spawn_poller(id, tid, None);
-                        attached = true;
-                    }
-                    continue;
+                    it.state = if pv.local_copy_percent >= 100 {
+                        ItemState::Completed
+                    } else if pv.transferred >= pv.total && pv.total > 0 {
+                        ItemState::Installing
+                    } else {
+                        ItemState::Transferring
+                    };
+                    it.progress = Some(pv);
+                    it.task_owner = current_addr;
                 }
+                if !attached {
+                    self.spawn_poller(id, tid, None);
+                    attached = true;
+                }
+                continue;
             }
             // Task unknown to the console: leave as Unknown with a hint.
             if let Some(it) = self.queue.get_mut(id) {
@@ -1832,6 +1969,12 @@ impl EngineInner {
 
     async fn shutdown(&mut self) {
         self.running = false;
+        // Flush state BEFORE the best-effort remote stop: that call can hang
+        // for the client's full timeout (15 s) while `EngineHandle::shutdown`
+        // hard-stops the runtime after 5 s — persisting afterwards could be
+        // skipped entirely on a black-holed console. All transitions already
+        // persist immediately, so this only secures the final flush.
+        self.persist_queue();
         // Best-effort console-side cleanup with a short timeout.
         if let Some(active) = self.active.take() {
             let _ = active.poll_cancel.send(true);
@@ -1840,7 +1983,6 @@ impl EngineInner {
         if let Some(server) = self.server.take() {
             server.shutdown();
         }
-        self.persist_queue();
         self.log(LogLevel::Info, "Engine shut down; state flushed");
     }
 }
@@ -1850,6 +1992,28 @@ impl EngineInner {
 /// Split out so the math is directly testable.
 fn blend_speed(prev_bps: u64, delta_bytes: u64, dt: f64) -> u64 {
     ((delta_bytes as f64 / dt) * 0.4 + prev_bps as f64 * 0.6) as u64
+}
+
+/// Best-effort stop of a console task/job through a specific client.
+/// Shared by the engine's current-console stop and the late-submit cleanup,
+/// which must act on the console the request was actually sent to.
+async fn stop_via(client: &RpiClient, use_v2: bool, task_id: i64, job_id: Option<i64>) {
+    match (use_v2, job_id) {
+        (true, Some(job)) => {
+            let _ = client.v2_job_op(job, "stop").await;
+        }
+        _ => {
+            let _ = client.stop_task(task_id).await;
+            let _ = client.unregister_task(task_id).await;
+        }
+    }
+}
+
+/// True when a task learned on `owner` may be operated on from `current`.
+/// `None` (pre-`task_owner` queue files) stays permissive so legacy queues
+/// keep re-attaching after reconnecting to the same console as before.
+fn task_belongs_to(owner: Option<SocketAddr>, current: Option<SocketAddr>) -> bool {
+    owner.is_none() || owner == current
 }
 
 /// Map a v2 job entry to the UI progress view (shared by the poller and the

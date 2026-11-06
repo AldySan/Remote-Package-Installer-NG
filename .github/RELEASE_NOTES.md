@@ -1,12 +1,20 @@
-A maintenance release with two queue-reliability fixes — no new features, no settings or workflow changes.
+A maintenance release with a focus on display and interaction correctness: queue rows render cleanly, diagnostics tell the truth, and several silent failure paths were removed. No new features, no settings or workflow changes.
 
 ## Fixed
 
-- **Switching to a different console while a package was installing no longer leaves the app in a mixed state.** The progress display used to keep following the old console while pause/stop commands went to the new one — and the package's download was cut by the connection change without any indication. The in-flight package is now clearly marked "Unknown" with a hint to reconnect to the original console to re-attach and verify, the same honest handling an explicit disconnect gets. Switching consoles never cancels the install that is still running on the original console.
-- **Pressing Retry gives a package its full set of automatic retries again.** If a package had already used up its retry budget (for example, the installer app on the console was still starting up), every later Retry would fail permanently on the first hiccup instead of retrying. Each fresh attempt now starts with a clean budget.
+- **Queue rows no longer overlap each other.** Rows were laid out into fixed-height slots while their real height varies (titles, error lines, action rows), so every row painted partly over the next one and long lists clipped their tail. The list now sizes each row to its content.
+- **"Check File Server" no longer reports a healthy server as not running.** The self-check used to probe loopback, but the server deliberately binds the network interface that can reach the console — so the probe was refused while a download was streaming. The check now targets the address the server actually listens on.
+- **The transfer speed readout no longer freezes at 0 on fast polling settings.** The speed sample baseline was refreshed on every poll, so at intervals under 0.4 s the samples were never far enough apart to be used. The baseline now only advances when a sample is actually consumed.
+- **Installing while switching consoles stays honest.** Task and job ids are console-specific: an item now remembers which console its task belongs to, so reconnecting, resuming or cancelling never aims an id at a different console's unrelated download. A late install answer after a disconnect keeps its id for re-attaching instead of stopping the task.
+- **Opening a second file dialog no longer silently discards the first pick.** The "Add…" buttons stayed clickable while a dialog was already open; picking files in the first dialog and opening a second threw the confirmed selection away without any feedback. The buttons now wait for the open dialog.
+- **A search that filters everything out no longer claims the queue is empty.** It showed the "drop files here" empty state as if the items had vanished; it now says nothing matches and offers to clear the search.
+- **"Scan again" and Connect no longer stack duplicate network sweeps** while one is already running (including the automatic startup scan).
+- **Consoles running on a custom port are re-validated correctly.** Remembered consoles were only probed on the two standard ports during a scan, so a console you had connected to on its own port silently failed re-validation. The scan now probes that port too.
+- **The queue state is flushed to disk before the remote cleanup on exit** — previously a hung console could delay the final flush past the app's shutdown window.
 
 ## Internal
 
-- Test suite: 94 automated tests (was 92) — all self-contained against a mock console, no console needed. The two new tests lock in console switching and retry budgets.
+- Test suite: 100 automated tests (was 94) — all self-contained against a mock console, no console needed.
+- `cargo fmt --check` and `cargo clippy -D warnings` clean; `unsafe` remains denied workspace-wide.
 
 **Install:** download the archive for your platform, extract it next to your packages, and run the executable — the app is portable and stores its settings in the same folder.

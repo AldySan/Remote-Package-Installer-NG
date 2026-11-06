@@ -161,6 +161,14 @@ chosen by the *current* connection's capabilities, so an item that carries a
 v2 `job_id` still resumes correctly after reconnecting to a legacy-only
 backend.
 
+**Task ids are console-scoped.** BGFT task ids (and v2 job ids) are assigned
+per console and collide across machines, so every queue item remembers which
+console its `task_id`/`job_id` were learned from (`task_owner`). Remote
+operations — late-submit cleanup, resume, cancel, and the reconnect
+reconcile's id matching — only aim at that console; content ids stay a valid
+cross-console match. Items in queue files older than the field default to an
+unknown owner and stay permissive, exactly as before the field existed.
+
 ### 4.3 Lenient JSON (the invalid-hex quirk)
 
 The original payload writes unquoted hex literals (`"bits": 0x20`) — invalid JSON

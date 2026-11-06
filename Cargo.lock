@@ -3275,7 +3275,7 @@ dependencies = [
 
 [[package]]
 name = "rpi-ng"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "eframe",
  "rfd",
@@ -3285,7 +3285,7 @@ dependencies = [
 
 [[package]]
 name = "rpi-ng-core"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "axum",
  "directories",

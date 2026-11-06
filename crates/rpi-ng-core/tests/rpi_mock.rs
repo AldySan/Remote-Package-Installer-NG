@@ -2569,3 +2569,447 @@ async fn engine_cancel_during_submit_window_is_honored() {
     );
     handle.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Fourth audit round: fast-poll speed sampling, late-submit console scoping
+// ---------------------------------------------------------------------------
+
+/// v0.0.6 regression: the speed readout froze at 0 for poll intervals below
+/// the 400 ms sampling threshold — the baseline timestamp was refreshed on
+/// every poll, so consecutive samples never got far enough apart to be used.
+#[tokio::test]
+async fn engine_speed_readout_works_at_fast_poll_intervals() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSASPEED_00-SPEEDTEST00.pkg",
+        "UP0001-CUSASPEED_00-SPEEDTEST00",
+    );
+
+    let mock = MockConsole::start(Dialect::Strict).await;
+    // A fixed 10 MiB task advanced 512 KiB per poll: ~20 polls of
+    // Transferring, plenty of samples for the readout to converge.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.fetch_urls = false;
+        st.step = 512 * 1024;
+    }
+    let settings = Settings {
+        poll_interval: Duration::from_millis(250), // below the 0.4 s threshold
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items.iter().any(|i| {
+                i.state == ItemState::Transferring
+                    && i.progress.map(|p| p.speed_bps > 0).unwrap_or(false)
+            })
+        },
+        Duration::from_secs(20),
+    )
+    .await;
+    let item = snap
+        .items
+        .iter()
+        .find(|i| i.state == ItemState::Transferring)
+        .unwrap();
+    let p = item.progress.unwrap();
+    assert!(
+        p.speed_bps >= 200_000,
+        "a 250 ms poll cycle must still produce a speed readout, got {} B/s",
+        p.speed_bps
+    );
+    handle.shutdown();
+}
+
+/// A delayed install answer that lands after a disconnect + reconnect must
+/// keep the task id (for a later reconcile on that console) and must NOT stop
+/// the console's task: disconnecting stops *observing*, not *controlling* —
+/// only an explicit Cancel ever stops a console task. The v0.0.6 code fired
+/// the stop through the new client on arrival, killing a download the design
+/// means to re-attach to.
+#[tokio::test]
+async fn engine_late_submit_after_disconnect_keeps_ids_and_task_alive() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSALATE_00-LATEANSWER.pkg",
+        "UP0001-CUSALATE_00-LATEANSWER",
+    );
+
+    let mock = MockConsole::start(Dialect::Strict).await;
+    {
+        let mut st = mock.state.lock().unwrap();
+        // The prerequisite fetch runs after the delay in the mock; the local
+        // file server is torn down by then, which would turn the late answer
+        // into a (realistic) transfer error — this test wants the success
+        // path, so the task is created without fetching.
+        st.fetch_urls = false;
+        st.install_delay_ms = 500;
+    }
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Submitting),
+        Duration::from_secs(10),
+    )
+    .await;
+    let id = snap.items[0].id;
+
+    // Drop the connection while the request is in flight, then reconnect to
+    // the SAME console before the answer lands.
+    handle.send(Command::Disconnect);
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == id && i.state == ItemState::Unknown)
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    handle.send(Command::Connect(mock.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Let the delayed answer land and fold in.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let mut latest = None;
+    for ev in handle.poll_events() {
+        if let Event::Snapshot(s) = ev {
+            latest = Some(s);
+        }
+    }
+    let latest = latest.expect("a snapshot follows the late answer");
+    let item = latest.items.iter().find(|i| i.id == id).unwrap();
+    assert_eq!(
+        item.state,
+        ItemState::Unknown,
+        "a late answer must not resurrect a parked item"
+    );
+    assert!(
+        item.task_id.is_some(),
+        "the id is kept for a later re-attach"
+    );
+    assert!(
+        item.task_owner.is_some_and(|a| a == mock.addr),
+        "the id is attributed to the console it belongs to"
+    );
+    assert!(
+        mock.stopped_tasks().is_empty(),
+        "disconnecting must not stop the console's task, got {:?}",
+        mock.stopped_tasks()
+    );
+    handle.shutdown();
+}
+
+/// Cancelling during the submit window and THEN switching consoles: the
+/// best-effort stop of the ghost task must go through the console the
+/// request was actually sent to — the current client points at the new
+// console, and firing the old task id there could stop an unrelated task
+/// (ids are console-scoped and collide).
+#[tokio::test]
+async fn engine_cancel_then_console_switch_stops_only_the_owner_console() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSASWIT_00-SWITCHSTOP.pkg",
+        "UP0001-CUSASWIT_00-SWITCHSTOP",
+    );
+
+    let mock_a = MockConsole::start(Dialect::Strict).await;
+    {
+        // See the late-answer test: the mock's prerequisite fetch would run
+        // after the delay against a file server that is already gone; this
+        // test needs the task to be created so the late stop has a target.
+        let mut st = mock_a.state.lock().unwrap();
+        st.fetch_urls = false;
+        st.install_delay_ms = 500;
+    }
+    let mock_b = MockConsole::start(Dialect::Strict).await;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(30),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock_a.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Submitting),
+        Duration::from_secs(10),
+    )
+    .await;
+    let id = snap.items[0].id;
+
+    // Cancel inside the submit window…
+    handle.send(Command::Cancel(id));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == id && i.state == ItemState::Cancelled)
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // …then connect to console B before the delayed answer lands.
+    handle.send(Command::Connect(mock_b.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| s.console.target.as_ref().map(|t| t.addr) == Some(mock_b.addr),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Let A's delayed answer land and fold in.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    for ev in handle.poll_events() {
+        let _ = ev;
+    }
+
+    // The ghost-task cleanup went to the console that owns the task…
+    let stopped_a = mock_a.stopped_tasks();
+    assert!(
+        !stopped_a.is_empty(),
+        "the late answer's task must still be stopped on the console it was sent to"
+    );
+    // …and the new console never saw a stop or install aimed at it.
+    assert!(
+        mock_b.stopped_tasks().is_empty(),
+        "the new console must not receive the old task id, got {:?}",
+        mock_b.stopped_tasks()
+    );
+    assert!(
+        mock_b.installs().is_empty(),
+        "nothing must be auto-submitted to the new console"
+    );
+    handle.shutdown();
+}
+
+/// Reconcile must not adopt a foreign console's task id: ids are
+/// console-scoped and collide across machines (BGFT counters start low on
+/// every console). A queue item parked as Unknown with console A's task id
+/// must not silently attach to console B's *unrelated* task with the same
+/// numeric id — content ids remain a valid cross-console match.
+#[tokio::test]
+async fn engine_reconcile_does_not_adopt_a_foreign_consoles_task_id() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let pkg_path = build_fake_pkg(
+        pkg_dir.path(),
+        "UP0001-CUSAFORE_00-FOREIGNID0.pkg",
+        "UP0001-CUSAFORE_00-FOREIGNID0",
+    );
+
+    let mock_a = MockConsole::start(Dialect::Strict).await;
+    mock_a.state.lock().unwrap().step = 4096; // still Transferring at the switch
+    let mock_b = MockConsole::start(Dialect::Strict).await;
+
+    let settings = Settings {
+        poll_interval: Duration::from_millis(25),
+        discovery_enabled: false,
+        ..Settings::default()
+    };
+    let handle = rpi_ng_core::engine::spawn_with(settings, Some(data_dir.path().to_path_buf()));
+
+    handle.send(Command::Connect(mock_a.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            matches!(
+                s.console.status,
+                rpi_ng_core::model::ConsoleStatus::Connected
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    handle.send(Command::AddPaths {
+        paths: vec![pkg_path],
+        recursive: false,
+    });
+    wait_for_snapshot(&handle, |s| !s.items.is_empty(), Duration::from_secs(10)).await;
+
+    handle.send(Command::Start);
+    let snap = wait_for_snapshot(
+        &handle,
+        |s| s.items.iter().any(|i| i.state == ItemState::Transferring),
+        Duration::from_secs(20),
+    )
+    .await;
+    let id = snap.items[0].id;
+    let task_id = snap.items[0].task_id.unwrap();
+
+    // Console B independently runs its own task with the SAME numeric id,
+    // for a different package.
+    mock_b.state.lock().unwrap().tasks.insert(
+        task_id,
+        MockTask {
+            total: 10 * 1024 * 1024,
+            transferred: 1024 * 1024,
+            local_copy: 0,
+            error: 0,
+        },
+    );
+
+    // Park the item as Unknown, then connect to console B.
+    handle.send(Command::Disconnect);
+    wait_for_snapshot(
+        &handle,
+        |s| {
+            s.items
+                .iter()
+                .any(|i| i.id == id && i.state == ItemState::Unknown)
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    handle.send(Command::Connect(mock_b.addr));
+    wait_for_snapshot(
+        &handle,
+        |s| s.console.target.as_ref().map(|t| t.addr) == Some(mock_b.addr),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Give reconcile room to (wrongly) attach, then inspect.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut latest = None;
+    for ev in handle.poll_events() {
+        if let Event::Snapshot(s) = ev {
+            latest = Some(s);
+        }
+    }
+    let latest = latest.expect("a snapshot follows the connect");
+    let item = latest.items.iter().find(|i| i.id == id).unwrap();
+    assert_eq!(
+        item.state,
+        ItemState::Unknown,
+        "a foreign console's task id must not be adopted (B's task {} is another package)",
+        task_id
+    );
+    assert!(
+        item.error
+            .as_deref()
+            .is_some_and(|e| e.contains("does not report")),
+        "the item keeps the verify-on-console hint, got {:?}",
+        item.error
+    );
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Fifth audit round — discovery re-validates remembered hosts on their port
+// ---------------------------------------------------------------------------
+
+/// A remembered console living on a custom port (manual entry, e.g.
+/// `192.168.1.42:12801`) must be re-verifiable by discovery on that port.
+/// `verify_addr` used to probe only the two standard ports, so such a
+/// console silently failed re-validation despite being reachable and
+/// connectable — the mock binds an ephemeral port, which is guaranteed to be
+/// non-standard, making the case deterministic without a fixed port.
+#[tokio::test]
+async fn discovery_verifies_remembered_hosts_on_their_own_port() {
+    let console = MockConsole::start(Dialect::Strict).await;
+    let candidate = rpi_ng_core::discovery::verify_addr(
+        console.addr,
+        rpi_ng_core::model::DiscoverySource::Remembered,
+    )
+    .await
+    .expect("a console on a non-standard port must verify on that port");
+
+    assert_eq!(candidate.addr, console.addr);
+    assert_eq!(
+        candidate.source,
+        rpi_ng_core::model::DiscoverySource::Remembered
+    );
+}

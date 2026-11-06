@@ -587,3 +587,193 @@ Regression: `requeue_resets_the_previous_attempts_bookkeeping`.
 - 94/94 tests green (`cargo test --workspace`), including the two new
   regressions; `cargo fmt --check` and `cargo clippy --workspace
   --all-targets -D warnings` clean; `unsafe_code = "deny"` unchanged.
+
+## 11. Addendum — fourth full re-audit (post-v0.0.6, dev)
+
+Scope: everything, with a deliberate extra pass over the UI layer for
+"silent" bugs — things that render wrong or mislead without crashing. Every
+finding below carries a regression test, a live experiment, or a headless
+measurement.
+
+### Fixed findings
+
+#### P1 — queue rows overlapped each other (queue view)
+
+`ScrollArea::show_rows` requires a **fixed** row height; it positions each
+row at `y = index × ROW_HEIGHT` and clips beyond the estimated content
+height. Rows here are variable-height (title lines, optional error text,
+per-state action row). Measured headlessly with a plain egui context:
+a typical row lays out at **~88 px**, one with an error line at **~101 px**,
+against the claimed `ROW_HEIGHT = 74` — every row overlapped the next by
+14–27 px (the next row's title painted over the previous row's actions),
+and long lists clipped their tail. Fix: render the rows in a plain
+`ScrollArea` — egui comfortably lays out thousands of widgets per frame, and
+the log panel already renders 500 entries unvirtualized. The filter-index
+optimization (search needle lowered once, no per-row clones) is kept.
+
+#### P1 — "Check File Server" reported a healthy server as dead
+
+The self-check probed `127.0.0.1:<port>`, but the file server normally binds
+the **specific interface** that can reach the console (`pick_bind_ip`) —
+binding `192.168.x.x:p` listens only there, so the loopback probe is
+refused and the chip said "not running" while a download was streaming.
+Proven live in this sandbox (bind LAN IP → loopback refused, own-IP accepted).
+Fix: the probe targets the server's real bound address (`self_check(bind)`),
+falling back to loopback only for an unspecified bind (`0.0.0.0`) — which is
+also the more honest diagnostic, since it exercises the very interface the
+console downloads from.
+
+#### P1 — speed readout frozen at poll intervals under 400 ms
+
+The legacy-dialect speed is an EMA over poll deltas with a 0.4 s minimum
+sample spacing — but the sample baseline timestamp was refreshed on *every*
+poll, so at a 250 ms interval consecutive samples were always 0.25 s apart:
+the delta was never used and the readout stayed 0 forever. Fix: the baseline
+only advances when the sample is actually consumed (or when the counter
+regresses, which reseeds). Regression:
+`engine_speed_readout_works_at_fast_poll_intervals`.
+
+#### P1 — late install answers acted on the wrong console
+
+A delayed `POST /api/install` answer landing after a disconnect/console
+switch ran through `self.client` — which by then points at a *different*
+console (or nothing). Two failure modes: for a parked (`Unknown`) item the
+old code recorded the foreign task id and then **stopped** it via the new
+client — on the same console this killed a download the design means to
+re-attach to, and on a different console the small task id could stop an
+**unrelated** task (ids collide across consoles). Fix: the submitting
+console travels with the request; a late answer for a parked item only
+records the ids (the task keeps running — disconnecting stops *observing*,
+not *controlling*), and the cancelled/removed cleanup goes through the very
+client the request was sent on.
+Regressions: `engine_late_submit_after_disconnect_keeps_ids_and_task_alive`,
+`engine_cancel_then_console_switch_stops_only_the_owner_console`.
+
+#### P1 — task ids adopted across consoles (reconcile/resume/cancel)
+
+`task_id`s are console-scoped (BGFT counters start at 1 on every console),
+but the engine happily aimed them wherever it was currently connected:
+reconcile matched remembered ids against *any* console's job/task list
+(could silently attach an item to another console's unrelated download and
+drive its state), Resume on a paused item fired at whatever console was
+connected, and Cancel of a parked item could stop a foreign task. Fix: the
+queue now records which console each `task_id`/`job_id` was learned from
+(`task_owner`, `serde(default)` so older queue files load unchanged and
+stay permissive); id matching and remote ops are gated on that console.
+Content ids remain a valid cross-console match (they identify the *package*).
+Regression: `engine_reconcile_does_not_adopt_a_foreign_consoles_task_id`,
+`legacy_queue_doc_without_task_owner_loads`. This closes the previously
+documented "theoretical" cross-console collision from §10 — recording the
+owner turned out to need neither content-id-first matching nor a breaking
+change.
+
+#### P3/P2 — small UI/UX hardening
+
+- A search that filters everything out showed "Drop PKG files here" while
+  items existed — now a distinct "no matches" state with a clear-search hint.
+- "Scan again" and the Connect buttons stayed clickable while a sweep/probe
+  was already running (stacking duplicate subnet sweeps / probe churn); the
+  engine now also ignores a stacked `Discover` while one is in flight.
+- Discovery sweeps no longer stack when the startup auto-sweep overlaps a
+  manual "Scan again".
+
+### Reviewed and intentionally left unchanged
+
+- **Snapshot clones the whole queue at each tick** (4 Hz while the server
+  runs): bounded, and the numbers only move when something actually happens.
+  Re-measured, still irrelevant at realistic queue sizes.
+- **`maybe_start_next` does one `fs::metadata` per part on the engine
+  thread**: local metadata calls are ~µs; moving them to `spawn_blocking`
+  would widen the submit path for no observable gain.
+- **Log panel renders up to 500 entries per repaint**: egui caches galley
+  layout by (text, style), so only new lines lay out; measured cost is fine.
+- **`update::http_client()`'s `expect()`**: same reasoning as §10.
+- **Non-virtualized queue at pathological sizes** (2000 items ≈ 20–40 ms
+  frame during scrolling): the 2000-file cap is the pathological case itself;
+  if it ever matters, a per-row height cache can restore virtualization —
+  the plain scroll area removed a whole bug class for the sizes this app
+  actually sees.
+
+### Verification
+
+- 99/99 tests green (`cargo test --workspace`), including the six new
+  regressions; `cargo fmt --check` and `cargo clippy --workspace
+  --all-targets -D warnings` clean; no `unsafe` anywhere in workspace code.
+- The row-height overlap was verified by headless egui measurement before
+  the fix; the loopback-vs-bound-IP behavior by a live TCP experiment.
+
+## 12. Addendum — fifth full re-audit (pre-v0.0.7, dev)
+
+Scope: everything again, line-by-line, with the same extra pass over the UI
+layer for hidden bugs (items that fail to appear, silent errors). The
+starting point was dev with §11 applied (99/99 green, clippy and fmt clean).
+
+### Fixed findings
+
+#### P1 — opening a second file dialog silently discarded the first pick (UI)
+
+Both "Add PKG files…" / "Add folder…" wrote `app.dialog = Some(new_pick)`,
+replacing any in-flight `DialogPick` — the replaced dialog's channel receiver
+was dropped, so a selection the user had *confirmed* in the first dialog was
+thrown away with no feedback. The native dialog does not block the egui main
+window (parentless on Windows/Linux), so the buttons stay clickable while a
+dialog is open; a double-click stacks two dialogs the same way. This is the
+classic "I picked the files and nothing appeared" failure. Fix: the Add
+buttons disable while a dialog is open (same guard pattern as "Scan again"
+while probing), with a hover hint on the disabled button. Pure-UI guard; no
+headless egui harness exists in this repo, so it carries no automated test
+(the state it guards — `app.dialog` — is trivially inspectable).
+
+#### P2 — the final queue flush raced the hard runtime stop (engine)
+
+`shutdown()` awaited the best-effort remote stop (client timeout 15 s) before
+`persist_queue()`, while `EngineHandle::shutdown` hard-stops the runtime after
+5 s — against a black-holed console the final flush could be skipped. Every
+state transition already persists immediately, so the only realistic loss was
+the last progress snapshot, but the reorder is free and makes the flush
+deterministic. No observable behavior change otherwise.
+
+#### P3 — remembered consoles on custom ports never re-validated (discovery)
+
+`verify_addr` ignored the port of the address it was given and probed only
+12800/9090 — so a console the user had connected to on a custom port (manual
+entry) silently failed the "remembered hosts are validated again on use"
+pass of every discovery sweep, while remaining perfectly connectable.
+Fix: the address's own port is probed first (standard ports follow; subnet
+sweep addresses carry a standard port and are unchanged).
+Regression: `discovery_verifies_remembered_hosts_on_their_own_port` (the mock
+binds an ephemeral port, which is guaranteed non-standard — deterministic
+without a fixed test port).
+
+### Reviewed and intentionally left unchanged
+
+- **Submit retries reuse URLs captured at submit time — traced to be
+  unreachable-stale.** A URL only goes stale when the file server is
+  replaced, and every server-replacement path (connect to another console,
+  disconnect/reconnect) first parks `Submitting` items to `Unknown`, which
+  fails the retry guard (`state == Submitting`). Retries therefore only ever
+  fire inside the console session whose server produced the URLs. Documented
+  so the next round does not re-trace it.
+- **`AddPaths` during an in-flight scan can stack a second walk** — reachable
+  only via drag-and-drop (the toolbar already disables Add while
+  `engine_busy`); both walks complete, both file sets are added, and the
+  queue dedups by path. A guard would silently *drop* files dragged during a
+  long scan — strictly worse than the duplicate walk.
+- **egui `raw.dropped_files` re-processing** — verified against the
+  egui-winit 0.37 source: `RawInput::take()` moves the list out every frame,
+  so a drop is seen by exactly one frame and processed exactly once. No bug.
+- **The poller never gives up while the console is Lost** — one bounded
+  request per poll interval; if the console comes back, tracking resumes
+  without user action. Bounded in rate by design.
+- **`queue_summary` omits Paused/Unknown/Cancelled counts** — the total
+  includes them and each row carries its own state chip; no data is hidden.
+- **`unwrap()`/`expect()` inventory re-checked** — all are startup-time
+  builders or guarded by same-tick invariants (`next_queued().expect`,
+  `active.as_ref().unwrap()` behind an equality check, lock unwraps that can
+  only panic after a fatal engine panic). No new exposure.
+
+### Verification
+
+- 100/100 tests green (`cargo test --workspace`), including the new
+  regression; `cargo fmt --check` and `cargo clippy --workspace --all-targets
+  -D warnings` clean; no `unsafe` anywhere in workspace code.
