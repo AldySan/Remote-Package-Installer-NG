@@ -2986,3 +2986,30 @@ async fn engine_reconcile_does_not_adopt_a_foreign_consoles_task_id() {
     );
     handle.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Fifth audit round — discovery re-validates remembered hosts on their port
+// ---------------------------------------------------------------------------
+
+/// A remembered console living on a custom port (manual entry, e.g.
+/// `192.168.1.42:12801`) must be re-verifiable by discovery on that port.
+/// `verify_addr` used to probe only the two standard ports, so such a
+/// console silently failed re-validation despite being reachable and
+/// connectable — the mock binds an ephemeral port, which is guaranteed to be
+/// non-standard, making the case deterministic without a fixed port.
+#[tokio::test]
+async fn discovery_verifies_remembered_hosts_on_their_own_port() {
+    let console = MockConsole::start(Dialect::Strict).await;
+    let candidate = rpi_ng_core::discovery::verify_addr(
+        console.addr,
+        rpi_ng_core::model::DiscoverySource::Remembered,
+    )
+    .await
+    .expect("a console on a non-standard port must verify on that port");
+
+    assert_eq!(candidate.addr, console.addr);
+    assert_eq!(
+        candidate.source,
+        rpi_ng_core::model::DiscoverySource::Remembered
+    );
+}

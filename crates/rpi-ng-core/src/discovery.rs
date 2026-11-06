@@ -184,11 +184,21 @@ pub async fn discover(settings: &Settings) -> Vec<ConsoleCandidate> {
     candidates
 }
 
-/// Verify one address on the known ports; the first port that answers the
-/// RPI probes wins.
+/// Verify one address; the first port that answers the RPI probes wins.
+///
+/// The address's own port is probed first: a remembered console may live on a
+/// custom port (manual entry), and only probing the two standard ports would
+/// silently fail re-validation for it — the "validated again on use" contract
+/// of `settings.remembered`. Subnet-sweep addresses already carry a standard
+/// port, so their behavior is unchanged.
 pub async fn verify_addr(addr: SocketAddr, source: DiscoverySource) -> Option<ConsoleCandidate> {
     let ip = addr.ip();
-    for port in PROBE_PORTS {
+    let mut ports: Vec<u16> = Vec::with_capacity(PROBE_PORTS.len() + 1);
+    if !PROBE_PORTS.contains(&addr.port()) {
+        ports.push(addr.port());
+    }
+    ports.extend_from_slice(&PROBE_PORTS);
+    for port in ports {
         let target = SocketAddr::new(ip, port);
         let client = RpiClient::new(target, Duration::from_millis(1500));
         if let Ok(probe) = client.probe().await {

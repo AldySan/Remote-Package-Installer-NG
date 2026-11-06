@@ -701,3 +701,79 @@ change.
   --all-targets -D warnings` clean; no `unsafe` anywhere in workspace code.
 - The row-height overlap was verified by headless egui measurement before
   the fix; the loopback-vs-bound-IP behavior by a live TCP experiment.
+
+## 12. Addendum — fifth full re-audit (pre-v0.0.7, dev)
+
+Scope: everything again, line-by-line, with the same extra pass over the UI
+layer for hidden bugs (items that fail to appear, silent errors). The
+starting point was dev with §11 applied (99/99 green, clippy and fmt clean).
+
+### Fixed findings
+
+#### P1 — opening a second file dialog silently discarded the first pick (UI)
+
+Both "Add PKG files…" / "Add folder…" wrote `app.dialog = Some(new_pick)`,
+replacing any in-flight `DialogPick` — the replaced dialog's channel receiver
+was dropped, so a selection the user had *confirmed* in the first dialog was
+thrown away with no feedback. The native dialog does not block the egui main
+window (parentless on Windows/Linux), so the buttons stay clickable while a
+dialog is open; a double-click stacks two dialogs the same way. This is the
+classic "I picked the files and nothing appeared" failure. Fix: the Add
+buttons disable while a dialog is open (same guard pattern as "Scan again"
+while probing), with a hover hint on the disabled button. Pure-UI guard; no
+headless egui harness exists in this repo, so it carries no automated test
+(the state it guards — `app.dialog` — is trivially inspectable).
+
+#### P2 — the final queue flush raced the hard runtime stop (engine)
+
+`shutdown()` awaited the best-effort remote stop (client timeout 15 s) before
+`persist_queue()`, while `EngineHandle::shutdown` hard-stops the runtime after
+5 s — against a black-holed console the final flush could be skipped. Every
+state transition already persists immediately, so the only realistic loss was
+the last progress snapshot, but the reorder is free and makes the flush
+deterministic. No observable behavior change otherwise.
+
+#### P3 — remembered consoles on custom ports never re-validated (discovery)
+
+`verify_addr` ignored the port of the address it was given and probed only
+12800/9090 — so a console the user had connected to on a custom port (manual
+entry) silently failed the "remembered hosts are validated again on use"
+pass of every discovery sweep, while remaining perfectly connectable.
+Fix: the address's own port is probed first (standard ports follow; subnet
+sweep addresses carry a standard port and are unchanged).
+Regression: `discovery_verifies_remembered_hosts_on_their_own_port` (the mock
+binds an ephemeral port, which is guaranteed non-standard — deterministic
+without a fixed test port).
+
+### Reviewed and intentionally left unchanged
+
+- **Submit retries reuse URLs captured at submit time — traced to be
+  unreachable-stale.** A URL only goes stale when the file server is
+  replaced, and every server-replacement path (connect to another console,
+  disconnect/reconnect) first parks `Submitting` items to `Unknown`, which
+  fails the retry guard (`state == Submitting`). Retries therefore only ever
+  fire inside the console session whose server produced the URLs. Documented
+  so the next round does not re-trace it.
+- **`AddPaths` during an in-flight scan can stack a second walk** — reachable
+  only via drag-and-drop (the toolbar already disables Add while
+  `engine_busy`); both walks complete, both file sets are added, and the
+  queue dedups by path. A guard would silently *drop* files dragged during a
+  long scan — strictly worse than the duplicate walk.
+- **egui `raw.dropped_files` re-processing** — verified against the
+  egui-winit 0.37 source: `RawInput::take()` moves the list out every frame,
+  so a drop is seen by exactly one frame and processed exactly once. No bug.
+- **The poller never gives up while the console is Lost** — one bounded
+  request per poll interval; if the console comes back, tracking resumes
+  without user action. Bounded in rate by design.
+- **`queue_summary` omits Paused/Unknown/Cancelled counts** — the total
+  includes them and each row carries its own state chip; no data is hidden.
+- **`unwrap()`/`expect()` inventory re-checked** — all are startup-time
+  builders or guarded by same-tick invariants (`next_queued().expect`,
+  `active.as_ref().unwrap()` behind an equality check, lock unwraps that can
+  only panic after a fatal engine panic). No new exposure.
+
+### Verification
+
+- 100/100 tests green (`cargo test --workspace`), including the new
+  regression; `cargo fmt --check` and `cargo clippy --workspace --all-targets
+  -D warnings` clean; no `unsafe` anywhere in workspace code.
