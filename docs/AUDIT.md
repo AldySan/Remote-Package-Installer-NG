@@ -777,3 +777,72 @@ without a fixed test port).
 - 100/100 tests green (`cargo test --workspace`), including the new
   regression; `cargo fmt --check` and `cargo clippy --workspace --all-targets
   -D warnings` clean; no `unsafe` anywhere in workspace code.
+
+## 13. Addendum — hand-edited queue hardening + UI-state test harness (dev)
+
+Prompted by a user report: `queue.json` is plain JSON sitting next to the
+executable (portable design), and a curious user *will* open it in an editor.
+Plus: several past hidden bugs only surfaced at runtime in the GUI (rows not
+showing, buttons doing nothing) — the pure presentation logic had zero tests
+because the repo deliberately has no egui headless harness (adding one is
+overengineering for now).
+
+### Fixed findings
+
+**P1 — hand-edited `queue.json` can produce colliding item ids (queue.rs).**
+Every id lookup (`get`/`get_mut`/`remove`/`move_item`, engine state updates,
+UI row buttons) resolves to the first match. A hand-duplicated entry therefore
+renders as two rows whose buttons both act on the *first* item — the second is
+an unreachable zombie whose state never changes. Worse, a hand-lowered
+`next_item` makes the next `add_paths` hand out an id that collides with a
+restored live item. Load now sanitizes structurally:
+
+- later duplicates of an item id are dropped (the first entry is the one every
+  live reference already points at);
+- `next_item`/`next_part` are raised past the highest existing id
+  (saturating — a hand-typed `u64::MAX` must not panic a debug build);
+- a part-less entry is kept visible as `Invalid` with an explanatory error
+  instead of being submitted as an install with zero URLs.
+
+Every repair is reported through `Queue::load_in_reported` and logged to the
+activity panel by the engine on startup, so entries are never silently
+dropped. Pristine documents (everything the app itself writes) load with zero
+repairs — pinned by a control test plus a save/load round-trip test.
+
+**P3 — UI-state logic was untestable (rpi-ng).** The exact contracts "which
+row is visible" and "which button exists in which state" lived inline in egui
+closures. They are now extracted as pure functions and pinned by unit tests in
+the binary crate (no GUI harness, no new dependencies):
+
+- `matches_search` (queue_view) — the search filter: empty needle shows all,
+  title/file name/title id/content id all match, case-insensitive via the
+  caller's trim+lowercase contract;
+- `RowActions::for_state` (queue_view) — the per-row button set for all eleven
+  states, including the deliberate Pause(global)/ResumeItem(per-item)
+  asymmetry and the mutually exclusive Cancel/Remove pair;
+- `ToolbarState::derive` (queue_view) — toolbar enablement from busy/dialog
+  open/queue content, including the disabled-Add hover reason (which gate is
+  actually blocking);
+- `queue_summary` (app) — the four visible buckets;
+- `fmt` — bytes/B/s/Mbps tiers/duration/clock-UTC regression tests locking in
+  the v0.0.3 Mbps fix and the v0.0.5 UTC-marker fix.
+
+The egui rendering code now *consumes* these structs; no rendering behavior
+changed.
+
+### Reviewed and intentionally left unchanged
+
+- **Part ids in a hand-edited document** — `rebuild_urls` re-registers every
+  part with the live file server and writes the returned ids back into the
+  queue on submit, so cross-item part-id collisions self-heal before they can
+  serve a wrong file. Only the `next_part` counter is repaired (consistency
+  for newly added parts).
+- **The `.bak` fallback path** — it goes through the same `from_doc`
+  sanitization, so a stale backup with duplicates is repaired identically.
+
+### Verification
+
+- 124/124 tests green (`cargo test --workspace`), including the new queue
+  sanitization integration tests and the UI-state unit tests;
+  `cargo fmt --check` clean; `cargo clippy --workspace --all-targets` zero
+  warnings; no `unsafe`, no new dependencies.

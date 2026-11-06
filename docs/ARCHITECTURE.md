@@ -212,6 +212,14 @@ tests can emit the *broken* form on purpose to lock this behavior in.
   marked `unknown` and *never auto-resubmitted*. When a console is connected, the
   engine reconciles via `find_task`/`is_exists`; the user sees "already installing /
   already installed / unknown — decide", with explicit resubmit as a deliberate act.
+- **Hand-edited `queue.json` sanitization (on load):** every id lookup (engine state
+  updates, remove/reorder, UI row buttons) resolves to the *first* matching item, so
+  a hand-added duplicate id is an unreachable zombie whose buttons act on the wrong
+  row. Load therefore drops later duplicates (keeping the first), raises
+  `next_item`/`next_part` past the highest existing id (so the next add cannot
+  collide), and marks part-less entries invalid instead of submitting an install
+  with zero URLs. Each repair is logged to the activity panel; pristine files load
+  with zero repairs.
 - **Ordering:** manual reorder (up/down/drag), plus optional "game before patch"
   ordering derived from parsed headers. Only one item is in flight at a time (BGFT on
   the console is single-task for package installs); the engine pipelines preparation
