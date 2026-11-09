@@ -644,3 +644,62 @@ pub(crate) fn queue_summary(items: &[QueueItem]) -> String {
     let active = items.iter().filter(|i| i.state.is_active()).count();
     format!("{total} item(s) · {done} done · {active} active · {failed} failed")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rpi_ng_core::model::{ItemState, PartFile, QueueItem};
+
+    fn item(state: ItemState) -> QueueItem {
+        QueueItem {
+            id: 0,
+            parts: vec![PartFile {
+                id: 0,
+                path: "/tmp/a.pkg".into(),
+                file_name: "a.pkg".into(),
+                size: 1,
+                part_index: None,
+                pkg: None,
+                invalid_reason: None,
+            }],
+            state,
+            error: None,
+            task_id: None,
+            task_owner: None,
+            job_id: None,
+            console_title: None,
+            progress: None,
+            attempts: 0,
+            added_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn summary_counts_the_four_visible_buckets() {
+        // Exactly what the toolbar line promises: total, done, active, failed.
+        // Cancelled/unknown/paused are total-only — that is the contract the
+        // first user-testing round settled on.
+        let items = vec![
+            item(ItemState::Completed),
+            item(ItemState::Completed),
+            item(ItemState::Transferring),
+            item(ItemState::Failed),
+            item(ItemState::Invalid),
+            item(ItemState::Cancelled),
+            item(ItemState::Unknown),
+        ];
+        assert_eq!(
+            queue_summary(&items),
+            "7 item(s) · 2 done · 1 active · 2 failed"
+        );
+    }
+
+    #[test]
+    fn summary_on_empty_queue() {
+        assert_eq!(
+            queue_summary(&[]),
+            "0 item(s) · 0 done · 0 active · 0 failed"
+        );
+    }
+}

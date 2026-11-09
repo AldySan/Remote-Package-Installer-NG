@@ -257,8 +257,8 @@ impl EngineInner {
         internal_tx: mpsc::UnboundedSender<Internal>,
         data_dir: Arc<Option<PathBuf>>,
     ) -> Self {
-        let queue = Queue::load_in(data_dir.as_deref());
-        Self {
+        let (queue, queue_repairs) = Queue::load_in_reported(data_dir.as_deref());
+        let inner = Self {
             settings,
             data_dir,
             evt,
@@ -275,7 +275,13 @@ impl EngineInner {
             copy_phase_stalls: 0,
             scanning: false,
             discovering: false,
+        };
+        // A hand-edited queue.json was repaired on load — say so instead of
+        // silently dropping entries the user may have just added by hand.
+        for warning in queue_repairs.warnings() {
+            inner.log(LogLevel::Warn, warning);
         }
+        inner
     }
 
     // -- plumbing ----------------------------------------------------------
