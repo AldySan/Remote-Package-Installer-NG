@@ -40,6 +40,11 @@ jobs:
           mkdir -p staging
           cp "target/release/${{ matrix.binary }}" staging/
           cp README.md LICENSE staging/
+      - name: Stage Linux desktop integration files
+        # Optional .desktop entry + hicolor icons for the tarball, so Linux
+        # users can give the app a proper launcher/dock icon.
+        if: runner.os == 'Linux'
+        run: cp -r packaging/linux staging/linux
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -66,20 +71,31 @@ jobs:
         run: |
           cargo build --release --locked --target aarch64-apple-darwin
           cargo build --release --locked --target x86_64-apple-darwin
-      - name: Create universal binary and package
+      - name: Create universal binary and app bundle
+        # A bare Mach-O binary has no icon on macOS (winit cannot set window
+        # icons there); the icon comes from the .app bundle's icns.
         run: |
-          mkdir -p staging
+          APP="RemotePackageInstallerNG.app"
+          VERSION="${APP_VERSION#v}"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           lipo -create \
             target/aarch64-apple-darwin/release/remote-package-installer-ng \
             target/x86_64-apple-darwin/release/remote-package-installer-ng \
-            -output staging/remote-package-installer-ng
-          cp README.md LICENSE staging/
-          tar -czf "RemotePackageInstallerNG-${{ env.APP_VERSION }}-macOS-universal.tar.gz" -C staging .
+            -output "$APP/Contents/MacOS/remote-package-installer-ng"
+          sed "s|__VERSION__|$VERSION|g" packaging/macos/Info.plist \
+            > "$APP/Contents/Info.plist"
+          cp crates/rpi-ng/assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+          printf 'APPL????' > "$APP/Contents/PkgInfo"
+          # Ad-hoc signature keeps the bundle internally consistent; the
+          # download stays unsigned, so the README's first-run note applies.
+          codesign --force --sign - "$APP"
+          zip -qry "RemotePackageInstallerNG-${APP_VERSION}-macOS-universal.zip" \
+            "$APP" README.md LICENSE
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: archive-macOS-universal
-          path: RemotePackageInstallerNG-${{ env.APP_VERSION }}-macOS-universal.tar.gz
+          path: RemotePackageInstallerNG-${{ env.APP_VERSION }}-macOS-universal.zip
 
   publish:
     name: Publish release

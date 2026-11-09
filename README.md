@@ -19,8 +19,8 @@ No accounts, no console-side setup, and nothing ever leaves your own network.
 1. **On the PS4**, open GoldHEN and start **Package Installer**. Keep it on screen the whole time — the PS4 pauses apps that go to the background.
 2. **On your computer**, download the app from the [Releases](https://github.com/AldySan/Remote-Package-Installer-NG/releases) page and unpack it:
    - Windows → `RemotePackageInstallerNG-vX.Y.Z-Windows-x64.zip`
-   - Mac → `RemotePackageInstallerNG-vX.Y.Z-macos-universal.tar.gz` (works on every Mac)
-   - Linux → `RemotePackageInstallerNG-vX.Y.Z-Linux-x64.tar.gz`
+   - Mac → `RemotePackageInstallerNG-vX.Y.Z-macos-universal.zip` (works on every Mac)
+   - Linux → `RemotePackageInstallerNG-vX.Y.Z-Linux-x64.tar.gz` (contains a `linux/` folder with optional menu-shortcut files if you want the app in your app launcher)
 3. Run the app. It looks for your PS4 on its own. If nothing shows up, type the PS4's IP address instead — you'll find it on the console under *Settings → Network → View Connection Status*.
 4. Add your `.pkg` files (one or many, whole folders too) and press **Start**.
 5. When the app says an item is **Done**, the game appears on your PS4's home screen.
