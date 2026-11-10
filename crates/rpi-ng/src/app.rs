@@ -87,7 +87,7 @@ impl App {
         let location = match &data_dir {
             Some(dir) => format!("Settings and the queue are stored in {}", dir.display()),
             None => {
-                "Settings storage could not be resolved — changes will not".to_string()
+                "Settings storage could not be resolved. Changes will not".to_string()
                     + " persist across restarts"
             }
         };
@@ -272,7 +272,7 @@ impl App {
                 (
                     LogLevel::Info,
                     format!(
-                        "Update available: {} (you have {}) — see the download page for \
+                        "Update available: {} (you have {}). See the download page for \
                          installers",
                         info.tag,
                         rpi_ng_core::VERSION
@@ -310,19 +310,19 @@ impl App {
                 LogLevel::Info,
                 format!(
                     "File server self-check: answering normally (HTTP {code}). If the console \
-                     still cannot download, the block is between the two machines — check the \
+                     still cannot download, the block is between the two machines: check the \
                      firewall allows this app on the local network."
                 ),
             ),
             ServerCheck::NotRunning => (
                 LogLevel::Warn,
-                "File server self-check: not running — it starts together with a console \
+                "File server self-check: not running: it starts together with a console \
                  connection."
                     .to_string(),
             ),
             ServerCheck::NoAnswer => (
                 LogLevel::Warn,
-                "File server self-check: no answer within the timeout — the server may have \
+                "File server self-check: no answer within the timeout: the server may have \
                  stopped, or a firewall/antivirus is intercepting the connection."
                     .to_string(),
             ),
@@ -351,7 +351,7 @@ impl App {
                             .strong()
                             .color(palette::Palette::of(ui).ok),
                     )
-                    .on_hover_text("A newer release is available — click for details")
+                    .on_hover_text("A newer release is available (click for details)")
                     .clicked()
                 {
                     self.show_update_window = true;
@@ -396,7 +396,7 @@ impl App {
                         ui.heading("Update available");
                         ui.add_space(6.0);
                         ui.label(format!(
-                            "Version {} is available — you have {}.",
+                            "Version {} is available (you have {}).",
                             info.version,
                             rpi_ng_core::VERSION
                         ));
@@ -431,7 +431,7 @@ impl App {
                         ui.label(
                             egui::RichText::new(
                                 "This is usually a connection problem or a temporary GitHub \
-                                 rate limit — trying again later is fine.",
+                                 rate limit; trying again later is fine.",
                             )
                             .small()
                             .weak(),
