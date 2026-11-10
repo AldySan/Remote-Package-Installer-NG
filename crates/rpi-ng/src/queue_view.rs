@@ -274,6 +274,17 @@ fn toolbar_search(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+/// Below this available width the server strip wraps into two rows.
+/// Measured headlessly with real egui metrics (see the layout tests): the
+/// rates group needs ~463px in the worst case and the controls group
+/// ~433px, so a single row needs ~903px. The 1120px default window stays
+/// single-row; the 860px minimum wraps.
+const SERVER_STRIP_SINGLE_ROW_MIN_WIDTH: f32 = 940.0;
+
+fn two_row_server_strip(available_width: f32) -> bool {
+    available_width < SERVER_STRIP_SINGLE_ROW_MIN_WIDTH
+}
+
 /// Live file-server line: where packages are served from, live in/out
 /// transfer rates, totals and the self-check button. Visible whenever the
 /// server runs (i.e. while a console session is up) — the natural home for
@@ -283,51 +294,74 @@ fn server_strip(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        let p = Palette::of(ui);
-        ui.colored_label(p.ok, "●");
-        ui.strong("File server");
-        ui.monospace(&server.base_url);
-        ui.separator();
-        ui.colored_label(p.ok, format!("↑ {}", fmt::mbps(server.tx_bps)))
-            .on_hover_text("Out: what the console is downloading from you (smoothed)");
-        ui.colored_label(p.info, format!("↓ {}", fmt::mbps(server.rx_bps)))
-            .on_hover_text("In: request/control traffic (tiny by design)");
-        let totals = format!(
-            "sent {} · received {}",
-            fmt::bytes(server.tx_total),
-            fmt::bytes(server.rx_total)
-        );
-
-        // Right side: self-check button + outcome chip + session totals.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let busy = app.server_checker.busy;
-            let label = if busy {
-                "Checking…"
-            } else {
-                "Check File Server"
-            };
-            if ui
-                .button(label)
-                .on_hover_text(
-                    "Test whether the app's own file server is answering on this \
-                     computer. If it is OK but the console still cannot download, the \
-                     block is between the two machines (firewall / network)",
-                )
-                .clicked()
-            {
-                // Probe the actual bound address: the server usually binds a
-                // specific interface (the one that can reach the console),
-                // which a loopback probe would wrongly report as dead.
-                app.server_checker.kick(server.bind);
-            }
-            if busy {
-                ui.add(egui::Spinner::new());
-            } else if let Some(result) = app.server_check_result.clone() {
-                check_chip(ui, &result);
-            }
-            ui.label(egui::RichText::new(totals).weak());
+    if two_row_server_strip(ui.available_width()) {
+        // Narrow: the rates row and the controls row split, so the session
+        // totals can never paint over the URL and transfer rates.
+        ui.horizontal(|ui| {
+            server_strip_rates(ui, &server);
         });
+        ui.horizontal(|ui| {
+            server_strip_controls(app, ui, &server);
+        });
+    } else {
+        ui.horizontal(|ui| {
+            server_strip_rates(ui, &server);
+            server_strip_controls(app, ui, &server);
+        });
+    }
+}
+
+/// Left group: serving URL plus live transfer rates.
+fn server_strip_rates(ui: &mut egui::Ui, server: &rpi_ng_core::model::ServerInfo) {
+    let p = Palette::of(ui);
+    ui.colored_label(p.ok, "●");
+    ui.strong("File server");
+    ui.monospace(&server.base_url);
+    ui.separator();
+    ui.colored_label(p.ok, format!("↑ {}", fmt::mbps(server.tx_bps)))
+        .on_hover_text("Out: what the console is downloading from you (smoothed)");
+    ui.colored_label(p.info, format!("↓ {}", fmt::mbps(server.rx_bps)))
+        .on_hover_text("In: request/control traffic (tiny by design)");
+}
+
+/// Right group: self-check button + outcome chip + session totals.
+fn server_strip_controls(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    server: &rpi_ng_core::model::ServerInfo,
+) {
+    let totals = format!(
+        "sent {} · received {}",
+        fmt::bytes(server.tx_total),
+        fmt::bytes(server.rx_total)
+    );
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let busy = app.server_checker.busy;
+        let label = if busy {
+            "Checking…"
+        } else {
+            "Check File Server"
+        };
+        if ui
+            .button(label)
+            .on_hover_text(
+                "Test whether the app's own file server is answering on this \
+                 computer. If it is OK but the console still cannot download, the \
+                 block is between the two machines (firewall / network)",
+            )
+            .clicked()
+        {
+            // Probe the actual bound address: the server usually binds a
+            // specific interface (the one that can reach the console),
+            // which a loopback probe would wrongly report as dead.
+            app.server_checker.kick(server.bind);
+        }
+        if busy {
+            ui.add(egui::Spinner::new());
+        } else if let Some(result) = app.server_check_result.clone() {
+            check_chip(ui, &result);
+        }
+        ui.label(egui::RichText::new(totals).weak());
     });
 }
 
@@ -1118,5 +1152,75 @@ mod tests {
         for part in ["24.6 GiB", "50.0 GiB", "111.6 MiB/s", "5m 02s"] {
             assert!(readout.contains(part), "readout {readout} lacks {part}");
         }
+    }
+
+    // -- server strip fits the minimum window (R-03) ------------------------
+
+    #[test]
+    fn server_strip_wraps_below_its_threshold() {
+        assert!(two_row_server_strip(844.0), "minimum window must wrap");
+        assert!(
+            !two_row_server_strip(1104.0),
+            "default window stays single-row"
+        );
+        assert!(!two_row_server_strip(SERVER_STRIP_SINGLE_ROW_MIN_WIDTH));
+    }
+
+    /// Measured with real egui metrics, not estimates: the wrapped rows must
+    /// fit the 860x560 minimum window, and the single-row threshold must
+    /// cover what the single row actually needs (worst-case rates, chip and
+    /// totals).
+    #[test]
+    fn server_strip_rows_fit_the_minimum_window_when_measured() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let min_usable = 860.0 - 2.0 * 8.0;
+
+            let rates = ui
+                .horizontal(|ui| {
+                    ui.colored_label(egui::Color32::WHITE, "●");
+                    ui.strong("File server");
+                    ui.monospace("http://192.168.1.42:12899/");
+                    ui.separator();
+                    ui.colored_label(egui::Color32::WHITE, "↑ 1000 Mbps");
+                    ui.colored_label(egui::Color32::WHITE, "↓ 1000 Mbps");
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE server rates row {:.0}", rates.width());
+            assert!(
+                rates.width() <= min_usable,
+                "rates row {:.0}px exceeds the {:.0}px minimum window",
+                rates.width(),
+                min_usable
+            );
+
+            let controls = ui
+                .horizontal(|ui| {
+                    let _ = ui.button("Check File Server");
+                    ui.colored_label(egui::Color32::WHITE, "OK (HTTP 400)");
+                    ui.label("sent 1023.9 GiB · received 1023.9 MiB");
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE server controls row {:.0}", controls.width());
+            assert!(
+                controls.width() <= min_usable,
+                "controls row {:.0}px exceeds the {:.0}px minimum window",
+                controls.width(),
+                min_usable
+            );
+
+            let gap = ui.style().spacing.item_spacing.x;
+            let single_row_needs = rates.width() + gap + controls.width();
+            eprintln!("MEASURE server single-row need {:.0}", single_row_needs);
+            assert!(
+                SERVER_STRIP_SINGLE_ROW_MIN_WIDTH >= single_row_needs + 30.0,
+                "threshold {:.0}px leaves <30px over the {:.0}px single-row need",
+                SERVER_STRIP_SINGLE_ROW_MIN_WIDTH,
+                single_row_needs
+            );
+        });
+        output.drop_without_applying_deltas();
     }
 }
