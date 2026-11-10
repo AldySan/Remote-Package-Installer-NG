@@ -11,7 +11,10 @@ use rpi_ng_core::{
     settings::{FailurePolicy, ThemeMode},
 };
 
-use crate::{app::App, palette::Palette};
+use crate::{
+    app::{App, escape_closes_top_window},
+    palette::Palette,
+};
 
 pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
     let Some(draft) = app.settings_draft.as_mut() else {
@@ -26,7 +29,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
     let check_result = app.server_check_result.clone();
     let mut save = false;
     let mut kick_check: Option<std::net::SocketAddr> = None;
-    egui::Window::new("Settings")
+    let window = egui::Window::new("Settings")
         .open(open)
         .collapsible(false)
         .resizable(false)
@@ -188,6 +191,11 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                 .weak(),
             );
         });
+    if let Some(w) = window
+        && escape_closes_top_window(ctx, Some(w.response.layer_id))
+    {
+        *open = false;
+    }
     if save && let Some(draft) = app.settings_draft.clone() {
         app.settings = draft.clone();
         app.send(rpi_ng_core::Command::SetSettings(Box::new(draft)));

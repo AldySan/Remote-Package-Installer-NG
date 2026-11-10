@@ -223,7 +223,7 @@ impl App {
         };
         // None = still deciding, Some(None) = cancelled, Some(Some(rec)) = scan.
         let mut action: Option<Option<bool>> = None;
-        egui::Window::new("Add folder")
+        let window = egui::Window::new("Add folder")
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -241,6 +241,9 @@ impl App {
                     }
                 });
             });
+        if action.is_none() && escape_closes_top_window(ctx, window.map(|w| w.response.layer_id)) {
+            action = Some(None);
+        }
         match action {
             Some(Some(recursive)) => {
                 self.pending_folder = None;
@@ -379,7 +382,7 @@ impl App {
         let mut open = self.show_update_window;
         let status = self.update_status.clone();
         let mut check_again = false;
-        egui::Window::new("Software update")
+        let window = egui::Window::new("Software update")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -443,6 +446,9 @@ impl App {
                     check_again = true;
                 }
             });
+        if escape_closes_top_window(ctx, window.map(|w| w.response.layer_id)) {
+            open = false;
+        }
         self.show_update_window = open;
         if check_again {
             self.updater.kick();
@@ -521,7 +527,7 @@ impl eframe::App for App {
             settings_view::show(self, ui.ctx(), &mut open);
             self.show_settings = open;
             if !self.show_settings {
-                // Closed via the window's ✕ — discard unsaved edits.
+                // Closed via ✕ or Escape — discard unsaved edits.
                 self.settings_draft = None;
             }
         }
@@ -602,7 +608,7 @@ impl App {
 }
 
 fn about_window(ctx: &egui::Context, open: &mut bool) {
-    egui::Window::new("About")
+    let window = egui::Window::new("About")
         .open(open)
         .collapsible(false)
         .resizable(false)
@@ -622,6 +628,29 @@ fn about_window(ctx: &egui::Context, open: &mut bool) {
                 "https://github.com/AldySan/Remote-Package-Installer-NG",
             );
         });
+    if escape_closes_top_window(ctx, window.map(|w| w.response.layer_id)) {
+        *open = false;
+    }
+}
+
+/// Escape closes a window, but only the front-most one: `layer` must be
+/// the topmost window layer (`Order::Middle`) this frame. egui 0.37
+/// `Window` closes only via its ✕ button, so apps wire Escape themselves;
+/// without the layer check, stacked windows (e.g. Settings behind the
+/// update prompt) would all close at once instead of just the front one.
+pub(crate) fn escape_closes_top_window(ctx: &egui::Context, layer: Option<egui::LayerId>) -> bool {
+    let Some(layer) = layer else {
+        return false;
+    };
+    if !ctx.input(|i| i.key_down(egui::Key::Escape)) {
+        return false;
+    }
+    let is_top = ctx.memory(|m| m.areas().top_layer_id(egui::Order::Middle)) == Some(layer);
+    if is_top {
+        // Consume so a lower window checking later this frame cannot also act.
+        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    }
+    is_top
 }
 
 pub(crate) fn queue_summary(items: &[QueueItem]) -> String {
@@ -694,5 +723,64 @@ mod tests {
             queue_summary(&[]),
             "0 item(s) · 0 done · 0 active · 0 failed"
         );
+    }
+
+    // -- Escape closes the front-most window (R-32) -------------------------
+
+    fn escape_frame() -> egui::RawInput {
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: Some(egui::Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        input
+    }
+
+    fn render_two_windows(ctx: &egui::Context) -> (Option<egui::LayerId>, Option<egui::LayerId>) {
+        let back = egui::Window::new("back window").show(ctx, |ui| {
+            ui.label("back");
+        });
+        let front = egui::Window::new("front window").show(ctx, |ui| {
+            ui.label("front");
+        });
+        (
+            back.map(|w| w.response.layer_id),
+            front.map(|w| w.response.layer_id),
+        )
+    }
+
+    #[test]
+    fn escape_closes_only_the_top_window() {
+        let ctx = egui::Context::default();
+        // Settle the window layers first (areas register over frames).
+        for _ in 0..2 {
+            ctx.run_pass(egui::RawInput::default(), |ctx| {
+                render_two_windows(ctx);
+            })
+            .drop_without_applying_deltas();
+        }
+        let output = ctx.run_pass(escape_frame(), |ctx| {
+            let (back, front) = render_two_windows(ctx);
+            let front_closes = escape_closes_top_window(ctx, front);
+            let back_closes = escape_closes_top_window(ctx, back);
+            assert!(front_closes, "the front window must close on Escape");
+            assert!(!back_closes, "the back window must stay open");
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn no_escape_no_close_and_none_layer_is_safe() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_pass(egui::RawInput::default(), |ctx| {
+            let (_, front) = render_two_windows(ctx);
+            assert!(!escape_closes_top_window(ctx, front));
+            // A window that did not render (None layer) must never close.
+            assert!(!escape_closes_top_window(ctx, None));
+        });
+        output.drop_without_applying_deltas();
     }
 }
