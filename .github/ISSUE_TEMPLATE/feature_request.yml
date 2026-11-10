@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest an idea or an improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. The best feature requests describe the problem
+        first and the solution second: there is often more than one way to
+        solve a problem, and knowing the real goal helps pick a good one.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: What are you trying to do that is awkward, slow or impossible today?
+      placeholder: |
+        I reinstall my games after every firmware update, and adding the
+        same 40 packages one folder at a time takes a lot of clicking.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like instead?
+      description: Describe the behavior you have in mind. Mockups or rough drawings are welcome.
+      placeholder: |
+        A "recently used folders" list next to Add folder, so I can re-add
+        last week's folders in one click.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other tools, workflows or workarounds you tried, and what was missing.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I looked through the open issues and did not find this idea already suggested.
+          required: true
