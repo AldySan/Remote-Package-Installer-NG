@@ -7,7 +7,9 @@
 //! during the fourth audit round: a plain row is ~88px, one with an error
 //! line ~101px. egui lays out thousands of widgets per frame comfortably,
 //! and the log panel already renders up to 500 entries unvirtualized, so the
-//! simplicity is the right trade here.
+//! simplicity is the right trade here. Rows with a live progress bar render
+//! two extra lines (the bar, then the transferred/speed readout) so they can
+//! never push their readout past the fixed right-hand column.
 
 use eframe::egui;
 
@@ -509,42 +511,44 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem, is_first: bool, is_l
 fn state_and_progress(ui: &mut egui::Ui, item: &QueueItem, color: egui::Color32) {
     ui.horizontal(|ui| {
         ui.colored_label(color, item.state.label());
-        if let Some(p) = &item.progress {
-            if item.state == ItemState::Transferring || item.state == ItemState::Installing {
-                let pct = p.percent;
-                let bar = egui::ProgressBar::new(pct.clamp(0.0, 100.0) / 100.0)
-                    .text(format!(
-                        "{pct:.1}% · {}{}",
-                        fmt::bytes(p.transferred),
-                        eta_suffix(p),
-                    ))
-                    .desired_height(14.0);
-                ui.add(bar);
-                let speed = if p.speed_bps > 0 {
-                    format!(" · {}", fmt::bps(p.speed_bps))
-                } else {
-                    String::new()
-                };
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} / {}{speed}",
-                        fmt::bytes(p.transferred),
-                        fmt::bytes(p.total)
-                    ))
-                    .small()
-                    .weak(),
-                );
-            } else if p.preparing_percent > 0 && p.preparing_percent < 100 {
-                ui.label(
-                    egui::RichText::new(format!("preparing {}%", p.preparing_percent))
-                        .small()
-                        .weak(),
-                );
-            }
-        } else if item.state == ItemState::Submitting {
+        if item.progress.is_none() && item.state == ItemState::Submitting {
             ui.add(egui::Spinner::new());
         }
     });
+    let Some(p) = &item.progress else { return };
+    if item.state == ItemState::Transferring || item.state == ItemState::Installing {
+        let pct = p.percent;
+        // egui's ProgressBar claims ALL remaining width when no desired
+        // width is set, so anything placed after it in the same horizontal
+        // paints past the fixed 230px right-hand column (measured: the old
+        // single-row layout needed 365px). The bar gets its own row and
+        // the readout wraps below it instead.
+        let bar = egui::ProgressBar::new(pct.clamp(0.0, 100.0) / 100.0)
+            .text(format!("{pct:.1}%"))
+            .desired_height(14.0);
+        ui.add(bar);
+        let speed = if p.speed_bps > 0 {
+            format!(" · {}", fmt::bps(p.speed_bps))
+        } else {
+            String::new()
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "{} / {}{speed}{}",
+                fmt::bytes(p.transferred),
+                fmt::bytes(p.total),
+                eta_suffix(p),
+            ))
+            .small()
+            .weak(),
+        );
+    } else if p.preparing_percent > 0 && p.preparing_percent < 100 {
+        ui.label(
+            egui::RichText::new(format!("preparing {}%", p.preparing_percent))
+                .small()
+                .weak(),
+        );
+    }
 }
 
 fn eta_suffix(p: &ProgressView) -> String {
@@ -1037,5 +1041,82 @@ mod tests {
             );
         });
         output.drop_without_applying_deltas();
+    }
+
+    // -- progress readout stays inside its column (R-03) -------------------
+
+    fn item_with_progress(state: ItemState) -> QueueItem {
+        let mut item = item_with(0, state);
+        item.progress = Some(ProgressView {
+            percent: 45.3,
+            transferred: 26_367_164_620,
+            total: 53_687_091_200,
+            speed_bps: 117_000_000,
+            eta_sec: Some(302),
+            piece_index: 0,
+            piece_total: 1,
+            preparing_percent: 100,
+            local_copy_percent: 0,
+            raw_error: 0,
+        });
+        item
+    }
+
+    /// The right-hand column of a queue row is a fixed 230px. The progress
+    /// bar claims all remaining width of its row, so the size/speed readout
+    /// must live on its own line below it: the pre-fix single-row layout
+    /// measured 365px and painted the readout 135px past the column edge,
+    /// clipped by the central panel.
+    #[test]
+    fn progress_readout_stays_inside_the_column() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for state in [ItemState::Transferring, ItemState::Installing] {
+                let item = item_with_progress(state);
+                let rect = ui
+                    .allocate_ui(egui::vec2(230.0, 300.0), |ui| {
+                        state_and_progress(ui, &item, egui::Color32::WHITE);
+                        ui.min_rect()
+                    })
+                    .inner;
+                assert!(
+                    rect.width() <= 230.0 + 1.0,
+                    "{state:?} progress row {:.0}px overflows the 230px column",
+                    rect.width()
+                );
+            }
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    /// The readout must keep carrying every number the old layout showed:
+    /// percent, transferred, total, speed and ETA (the transferred bytes
+    /// used to be printed twice; now they appear once).
+    #[test]
+    fn progress_readout_shows_all_the_numbers() {
+        // The bar text is "{pct:.1}%"; the readout line is built from the
+        // same fmt helpers the row renders with, so pin their combination.
+        let p = ProgressView {
+            percent: 45.3,
+            transferred: 26_367_164_620,
+            total: 53_687_091_200,
+            speed_bps: 117_000_000,
+            eta_sec: Some(302),
+            piece_index: 0,
+            piece_total: 1,
+            preparing_percent: 100,
+            local_copy_percent: 0,
+            raw_error: 0,
+        };
+        let speed = format!(" · {}", fmt::bps(p.speed_bps));
+        let readout = format!(
+            "{} / {}{speed}{}",
+            fmt::bytes(p.transferred),
+            fmt::bytes(p.total),
+            eta_suffix(&p)
+        );
+        for part in ["24.6 GiB", "50.0 GiB", "111.6 MiB/s", "5m 02s"] {
+            assert!(readout.contains(part), "readout {readout} lacks {part}");
+        }
     }
 }
