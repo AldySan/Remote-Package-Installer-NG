@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Remote Package Installer NG
+GenericName=PS4 Package Installer
+Comment=Send PS4 .pkg files to your console over your home network
+Exec=remote-package-installer-ng
+Icon=remote-package-installer-ng
+Terminal=false
+Categories=Utility;Network;FileTransfer;
+StartupWMClass=remote-package-installer-ng

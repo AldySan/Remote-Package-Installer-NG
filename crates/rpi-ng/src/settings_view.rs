@@ -11,7 +11,10 @@ use rpi_ng_core::{
     settings::{FailurePolicy, ThemeMode},
 };
 
-use crate::app::App;
+use crate::{
+    app::{App, escape_closes_top_window},
+    palette::Palette,
+};
 
 pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
     let Some(draft) = app.settings_draft.as_mut() else {
@@ -26,7 +29,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
     let check_result = app.server_check_result.clone();
     let mut save = false;
     let mut kick_check: Option<std::net::SocketAddr> = None;
-    egui::Window::new("Settings")
+    let window = egui::Window::new("Settings")
         .open(open)
         .collapsible(false)
         .resizable(false)
@@ -72,12 +75,12 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                         if ui
                             .add_enabled(server_bind.is_some(), egui::Button::new(label))
                             .on_disabled_hover_text(
-                                "The file server starts when you connect to a console — \
+                                "The file server starts when you connect to a console; \
                                  connect first, then check",
                             )
                             .on_hover_text(
                                 "Test whether the app's own file server is answering on this \
-                                 computer — if it is OK but the console still cannot download, the \
+                                 computer. If it is OK but the console still cannot download, the \
                                  block is between the two machines (firewall / network)",
                             )
                             .clicked()
@@ -87,22 +90,15 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                         if check_busy {
                             ui.add(egui::Spinner::new());
                         } else if let Some(result) = &check_result {
+                            let p = Palette::of(ui);
+                            let color = p.server_check(result);
                             match result {
-                                ServerCheck::Responded(code) => ui.colored_label(
-                                    egui::Color32::from_rgb(34, 197, 94),
-                                    format!("OK (HTTP {code})"),
-                                ),
-                                ServerCheck::NotRunning => {
-                                    ui.colored_label(egui::Color32::GRAY, "not running")
+                                ServerCheck::Responded(code) => {
+                                    ui.colored_label(color, format!("OK (HTTP {code})"))
                                 }
-                                ServerCheck::NoAnswer => ui.colored_label(
-                                    egui::Color32::from_rgb(245, 158, 11),
-                                    "no answer",
-                                ),
-                                ServerCheck::Error(_) => ui.colored_label(
-                                    egui::Color32::from_rgb(239, 68, 68),
-                                    "check failed",
-                                ),
+                                ServerCheck::NotRunning => ui.colored_label(color, "not running"),
+                                ServerCheck::NoAnswer => ui.colored_label(color, "no answer"),
+                                ServerCheck::Error(_) => ui.colored_label(color, "check failed"),
                             };
                         }
                     });
@@ -189,12 +185,17 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
             );
             ui.label(
                 egui::RichText::new(
-                    "The update check only asks GitHub for the latest release tag — \
+                    "The update check only asks GitHub for the latest release tag; \
                      nothing else is sent.",
                 )
                 .weak(),
             );
         });
+    if let Some(w) = window
+        && escape_closes_top_window(ctx, Some(w.response.layer_id))
+    {
+        *open = false;
+    }
     if save && let Some(draft) = app.settings_draft.clone() {
         app.settings = draft.clone();
         app.send(rpi_ng_core::Command::SetSettings(Box::new(draft)));

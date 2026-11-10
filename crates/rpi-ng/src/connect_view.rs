@@ -7,9 +7,22 @@ use eframe::egui;
 
 use rpi_ng_core::model::{ConsoleStatus, DiscoverySource};
 
-use crate::app::App;
+use crate::{app::App, palette::Palette};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    // Scrolled, not squeezed: with a handful of discovered and remembered
+    // consoles the content measures taller than the central panel at the
+    // 860x560 minimum window (446px of content against roughly 380px with
+    // the log panel open), which used to push the manual-address fallback
+    // and the troubleshooting section out of reach with no way back.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            content(app, ui);
+        });
+}
+
+fn content(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
         .inner_margin(egui::Margin::same(24))
         .corner_radius(8.0);
@@ -85,7 +98,7 @@ fn status_line(app: &mut App, ui: &mut egui::Ui) {
             egui::RichText::new(format!(
                 "The last address did not answer like an installer: {reason}"
             ))
-            .color(egui::Color32::from_rgb(239, 68, 68)),
+            .color(Palette::of(ui).error),
         );
     }
     if matches!(app.snapshot.console.status, ConsoleStatus::Lost) {
@@ -94,7 +107,7 @@ fn status_line(app: &mut App, ui: &mut egui::Ui) {
                 "The console stopped answering. Keep the installer app in the foreground on \
                  the console (the PS4 suspends background apps), then reconnect.",
             )
-            .color(egui::Color32::from_rgb(245, 158, 11)),
+            .color(Palette::of(ui).warn),
         );
     }
 }
@@ -116,7 +129,7 @@ fn candidates(app: &mut App, ui: &mut egui::Ui) {
                     DiscoverySource::Remembered => "remembered",
                     DiscoverySource::Manual => "manual",
                 };
-                ui.colored_label(egui::Color32::GREEN, "●");
+                ui.colored_label(Palette::of(ui).ok, "●");
                 ui.strong(cand.addr.to_string());
                 ui.label(
                     egui::RichText::new(format!("{} · {}", cand.kind, source))
@@ -203,13 +216,13 @@ fn troubleshooting(ui: &mut egui::Ui) {
                     "• Check that the PS4 and this computer are on the same network (no \
                      guest/AP isolation).\n\
                      • On the PS4, start the Remote Package Installer app and keep it in the \
-                     foreground — the PS4 suspends background apps.\n\
+                     foreground: the PS4 suspends background apps.\n\
                      • GoldHEN users: start the installer from the GoldHEN menu, or note that \
-                     some setups use port 9090 instead of 12800 — try 192.168.1.42:9090.\n\
+                     some setups use port 9090 instead of 12800 (try 192.168.1.42:9090).\n\
                      • Verify the console IP in Settings → Network → View Connection Status.\n\
                      • Firewalls: this app serves files from your computer to the console; allow \
                      it on the local network when prompted.\n\
-                     • Large subnets: the scan covers a bounded number of addresses — use the \
+                     • Large subnets: the scan covers a bounded number of addresses: use the \
                      manual address for unusual networks.",
                 )
                 .weak(),

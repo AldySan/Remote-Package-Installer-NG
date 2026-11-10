@@ -13,8 +13,8 @@ use rpi_ng_core::{
 };
 
 use crate::{
-    connect_view, dialogs, log_view, queue_view, servercheck::ServerChecker, settings_view,
-    updater::Updater,
+    connect_view, dialogs, log_view, palette, queue_view, servercheck::ServerChecker,
+    settings_view, updater::Updater,
 };
 
 const MAX_LOG_LINES: usize = 500;
@@ -87,7 +87,7 @@ impl App {
         let location = match &data_dir {
             Some(dir) => format!("Settings and the queue are stored in {}", dir.display()),
             None => {
-                "Settings storage could not be resolved — changes will not".to_string()
+                "Settings storage could not be resolved. Changes will not".to_string()
                     + " persist across restarts"
             }
         };
@@ -137,6 +137,13 @@ impl App {
             ThemeMode::Dark => egui::ThemePreference::Dark,
         };
         ctx.set_theme(pref);
+        // egui's dark weak text (text color x 0.6) is ~2.3:1 on the dark
+        // panel, far below WCAG AA. Raising the alpha keeps a hint of
+        // hierarchy while staying readable (see palette.rs tests). The light
+        // theme keeps egui's default, which passes comfortably.
+        ctx.style_mut_of(egui::Theme::Dark, |s| {
+            s.visuals.weak_text_alpha = palette::DARK_WEAK_TEXT_ALPHA;
+        });
     }
 
     fn poll_engine(&mut self) -> bool {
@@ -216,7 +223,7 @@ impl App {
         };
         // None = still deciding, Some(None) = cancelled, Some(Some(rec)) = scan.
         let mut action: Option<Option<bool>> = None;
-        egui::Window::new("Add folder")
+        let window = egui::Window::new("Add folder")
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -234,6 +241,9 @@ impl App {
                     }
                 });
             });
+        if action.is_none() && escape_closes_top_window(ctx, window.map(|w| w.response.layer_id)) {
+            action = Some(None);
+        }
         match action {
             Some(Some(recursive)) => {
                 self.pending_folder = None;
@@ -265,7 +275,7 @@ impl App {
                 (
                     LogLevel::Info,
                     format!(
-                        "Update available: {} (you have {}) — see the download page for \
+                        "Update available: {} (you have {}). See the download page for \
                          installers",
                         info.tag,
                         rpi_ng_core::VERSION
@@ -303,19 +313,19 @@ impl App {
                 LogLevel::Info,
                 format!(
                     "File server self-check: answering normally (HTTP {code}). If the console \
-                     still cannot download, the block is between the two machines — check the \
+                     still cannot download, the block is between the two machines: check the \
                      firewall allows this app on the local network."
                 ),
             ),
             ServerCheck::NotRunning => (
                 LogLevel::Warn,
-                "File server self-check: not running — it starts together with a console \
+                "File server self-check: not running: it starts together with a console \
                  connection."
                     .to_string(),
             ),
             ServerCheck::NoAnswer => (
                 LogLevel::Warn,
-                "File server self-check: no answer within the timeout — the server may have \
+                "File server self-check: no answer within the timeout: the server may have \
                  stopped, or a firewall/antivirus is intercepting the connection."
                     .to_string(),
             ),
@@ -342,9 +352,9 @@ impl App {
                     .button(
                         egui::RichText::new(format!("New: {}", info.tag))
                             .strong()
-                            .color(egui::Color32::from_rgb(34, 197, 94)),
+                            .color(palette::Palette::of(ui).ok),
                     )
-                    .on_hover_text("A newer release is available — click for details")
+                    .on_hover_text("A newer release is available (click for details)")
                     .clicked()
                 {
                     self.show_update_window = true;
@@ -372,7 +382,7 @@ impl App {
         let mut open = self.show_update_window;
         let status = self.update_status.clone();
         let mut check_again = false;
-        egui::Window::new("Software update")
+        let window = egui::Window::new("Software update")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -389,7 +399,7 @@ impl App {
                         ui.heading("Update available");
                         ui.add_space(6.0);
                         ui.label(format!(
-                            "Version {} is available — you have {}.",
+                            "Version {} is available (you have {}).",
                             info.version,
                             rpi_ng_core::VERSION
                         ));
@@ -418,13 +428,13 @@ impl App {
                         ui.label(
                             egui::RichText::new(reason.clone())
                                 .small()
-                                .color(egui::Color32::from_rgb(239, 68, 68)),
+                                .color(palette::Palette::of(ui).error),
                         );
                         ui.add_space(4.0);
                         ui.label(
                             egui::RichText::new(
                                 "This is usually a connection problem or a temporary GitHub \
-                                 rate limit — trying again later is fine.",
+                                 rate limit; trying again later is fine.",
                             )
                             .small()
                             .weak(),
@@ -436,6 +446,9 @@ impl App {
                     check_again = true;
                 }
             });
+        if escape_closes_top_window(ctx, window.map(|w| w.response.layer_id)) {
+            open = false;
+        }
         self.show_update_window = open;
         if check_again {
             self.updater.kick();
@@ -456,36 +469,26 @@ impl eframe::App for App {
 
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.strong("Remote Package Installer NG");
-                ui.separator();
-                self.console_status_chip(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("About").clicked() {
-                        self.show_about = !self.show_about;
-                    }
-                    let log_label = if self.show_log {
-                        "Hide log"
-                    } else {
-                        "Show log"
-                    };
-                    if ui.button(log_label).clicked() {
-                        self.show_log = !self.show_log;
-                    }
-                    if ui.button("Settings…").clicked() {
-                        self.show_settings = !self.show_settings;
-                        // Seed the draft from the (engine-kept-fresh) settings
-                        // on open; discard it on toggle-off.
-                        self.settings_draft = if self.show_settings {
-                            Some(self.settings.clone())
-                        } else {
-                            None
-                        };
-                    }
+            if two_row_top_bar(ui.available_width()) {
+                // Narrow: the identity row and the controls row split, the
+                // same deal the queue toolbar gets; a long console chip can
+                // no longer collide with the right-aligned buttons.
+                ui.horizontal(|ui| {
+                    ui.strong("Remote Package Installer NG");
                     ui.separator();
-                    self.update_controls(ui);
+                    self.console_status_chip(ui);
                 });
-            });
+                ui.horizontal(|ui| {
+                    self.top_bar_controls(ui);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.strong("Remote Package Installer NG");
+                    ui.separator();
+                    self.console_status_chip(ui);
+                    self.top_bar_controls(ui);
+                });
+            }
             ui.add_space(4.0);
         });
 
@@ -514,7 +517,7 @@ impl eframe::App for App {
             settings_view::show(self, ui.ctx(), &mut open);
             self.show_settings = open;
             if !self.show_settings {
-                // Closed via the window's ✕ — discard unsaved edits.
+                // Closed via ✕ or Escape — discard unsaved edits.
                 self.settings_draft = None;
             }
         }
@@ -555,12 +558,42 @@ impl eframe::App for App {
 }
 
 impl App {
+    fn top_bar_controls(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("About").clicked() {
+                self.show_about = !self.show_about;
+            }
+            let log_label = if self.show_log {
+                "Hide log"
+            } else {
+                "Show log"
+            };
+            if ui.button(log_label).clicked() {
+                self.show_log = !self.show_log;
+            }
+            if ui.button("Settings…").clicked() {
+                self.show_settings = !self.show_settings;
+                // Seed the draft from the (engine-kept-fresh) settings
+                // on open; discard it on toggle-off.
+                self.settings_draft = if self.show_settings {
+                    Some(self.settings.clone())
+                } else {
+                    None
+                };
+            }
+            ui.separator();
+            self.update_controls(ui);
+        });
+    }
+
     fn console_status_chip(&mut self, ui: &mut egui::Ui) {
-        let (color, label) = match &self.snapshot.console.status {
-            ConsoleStatus::None => (egui::Color32::GRAY, "No console".to_string()),
-            ConsoleStatus::Probing => (egui::Color32::YELLOW, "Connecting…".into()),
-            ConsoleStatus::Connected => {
-                let t = self
+        let (color, label) = {
+            let p = palette::Palette::of(ui);
+            let color = p.console_status(&self.snapshot.console.status);
+            let label = match &self.snapshot.console.status {
+                ConsoleStatus::None => "No console".to_string(),
+                ConsoleStatus::Probing => "Connecting…".into(),
+                ConsoleStatus::Connected => self
                     .snapshot
                     .console
                     .target
@@ -574,15 +607,20 @@ impl App {
                         };
                         format!("{who} ({})", t.addr)
                     })
-                    .unwrap_or_else(|| "Connected".into());
-                (egui::Color32::GREEN, t)
-            }
-            ConsoleStatus::Incompatible(reason) => {
-                (egui::Color32::RED, format!("Incompatible: {reason}"))
-            }
-            ConsoleStatus::Lost => (egui::Color32::RED, "Console lost".into()),
+                    .unwrap_or_else(|| "Connected".into()),
+                ConsoleStatus::Incompatible(reason) => format!("Incompatible: {reason}"),
+                ConsoleStatus::Lost => "Console lost".into(),
+            };
+            (color, label)
         };
-        ui.colored_label(color, format!("● {label}"));
+        let full = format!("● {label}");
+        let chip = ui
+            .scope(|ui| {
+                ui.set_max_width(MAX_CHIP_WIDTH);
+                ui.add(egui::Label::new(egui::RichText::new(full.clone()).color(color)).truncate())
+            })
+            .inner;
+        chip.on_hover_text(full);
         if self.connected()
             && ui
                 .small_button("Switch")
@@ -595,7 +633,7 @@ impl App {
 }
 
 fn about_window(ctx: &egui::Context, open: &mut bool) {
-    egui::Window::new("About")
+    let window = egui::Window::new("About")
         .open(open)
         .collapsible(false)
         .resizable(false)
@@ -615,20 +653,47 @@ fn about_window(ctx: &egui::Context, open: &mut bool) {
                 "https://github.com/AldySan/Remote-Package-Installer-NG",
             );
         });
+    if escape_closes_top_window(ctx, window.map(|w| w.response.layer_id)) {
+        *open = false;
+    }
 }
 
-pub(crate) fn state_color(state: &ItemState) -> egui::Color32 {
-    match state {
-        ItemState::Queued => egui::Color32::GRAY,
-        ItemState::Preparing | ItemState::Submitting => egui::Color32::from_rgb(96, 165, 250),
-        ItemState::Transferring => egui::Color32::from_rgb(59, 130, 246),
-        ItemState::Installing => egui::Color32::from_rgb(147, 51, 234),
-        ItemState::Paused => egui::Color32::from_rgb(245, 158, 11),
-        ItemState::Completed => egui::Color32::from_rgb(34, 197, 94),
-        ItemState::Failed | ItemState::Invalid => egui::Color32::from_rgb(239, 68, 68),
-        ItemState::Cancelled => egui::Color32::from_rgb(120, 113, 108),
-        ItemState::Unknown => egui::Color32::from_rgb(168, 85, 247),
+/// Escape closes a window, but only the front-most one: `layer` must be
+/// the topmost window layer (`Order::Middle`) this frame. egui 0.37
+/// `Window` closes only via its ✕ button, so apps wire Escape themselves;
+/// without the layer check, stacked windows (e.g. Settings behind the
+/// update prompt) would all close at once instead of just the front one.
+pub(crate) fn escape_closes_top_window(ctx: &egui::Context, layer: Option<egui::LayerId>) -> bool {
+    let Some(layer) = layer else {
+        return false;
+    };
+    if !ctx.input(|i| i.key_down(egui::Key::Escape)) {
+        return false;
     }
+    let is_top = ctx.memory(|m| m.areas().top_layer_id(egui::Order::Middle)) == Some(layer);
+    if is_top {
+        // Consume so a lower window checking later this frame cannot also act.
+        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    }
+    is_top
+}
+
+/// Below this available width the top bar wraps into two rows (identity,
+/// then controls). Measured headlessly with real egui metrics: the worst
+/// controls row ("Check for updates" plus the up-to-date checkmark) needs
+/// ~364px, the title plus separator ~229px, and the chip is capped at
+/// [`MAX_CHIP_WIDTH`], so a single row needs ~930px. The 1120px default
+/// window stays single-row; the 860px minimum wraps.
+const TOP_BAR_SINGLE_ROW_MIN_WIDTH: f32 = 960.0;
+
+/// Long backend identities ("Remote PKG Installer NextGen 0.0.3
+/// (192.168.1.42:12800)") and incompatibility reasons must not push the
+/// chip into the right-aligned controls: the label truncates at this many
+/// pixels and the full text stays one hover away.
+const MAX_CHIP_WIDTH: f32 = 320.0;
+
+fn two_row_top_bar(available_width: f32) -> bool {
+    available_width < TOP_BAR_SINGLE_ROW_MIN_WIDTH
 }
 
 pub(crate) fn queue_summary(items: &[QueueItem]) -> String {
@@ -701,5 +766,144 @@ mod tests {
             queue_summary(&[]),
             "0 item(s) · 0 done · 0 active · 0 failed"
         );
+    }
+
+    // -- Escape closes the front-most window (R-32) -------------------------
+
+    fn escape_frame() -> egui::RawInput {
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: Some(egui::Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        input
+    }
+
+    fn render_two_windows(ctx: &egui::Context) -> (Option<egui::LayerId>, Option<egui::LayerId>) {
+        let back = egui::Window::new("back window").show(ctx, |ui| {
+            ui.label("back");
+        });
+        let front = egui::Window::new("front window").show(ctx, |ui| {
+            ui.label("front");
+        });
+        (
+            back.map(|w| w.response.layer_id),
+            front.map(|w| w.response.layer_id),
+        )
+    }
+
+    #[test]
+    fn escape_closes_only_the_top_window() {
+        let ctx = egui::Context::default();
+        // Settle the window layers first (areas register over frames).
+        for _ in 0..2 {
+            ctx.run_pass(egui::RawInput::default(), |ctx| {
+                render_two_windows(ctx);
+            })
+            .drop_without_applying_deltas();
+        }
+        let output = ctx.run_pass(escape_frame(), |ctx| {
+            let (back, front) = render_two_windows(ctx);
+            let front_closes = escape_closes_top_window(ctx, front);
+            let back_closes = escape_closes_top_window(ctx, back);
+            assert!(front_closes, "the front window must close on Escape");
+            assert!(!back_closes, "the back window must stay open");
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn no_escape_no_close_and_none_layer_is_safe() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_pass(egui::RawInput::default(), |ctx| {
+            let (_, front) = render_two_windows(ctx);
+            assert!(!escape_closes_top_window(ctx, front));
+            // A window that did not render (None layer) must never close.
+            assert!(!escape_closes_top_window(ctx, None));
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    // -- top bar fits the minimum window (R-03) -----------------------------
+
+    #[test]
+    fn top_bar_wraps_below_its_threshold() {
+        assert!(two_row_top_bar(844.0), "minimum window must wrap");
+        assert!(!two_row_top_bar(1104.0), "default window stays single-row");
+        assert!(!two_row_top_bar(TOP_BAR_SINGLE_ROW_MIN_WIDTH));
+    }
+
+    /// Measured with real egui metrics, not estimates: the wrapped rows must
+    /// fit the 860x560 minimum window, and the single-row threshold must
+    /// cover what the single row actually needs (worst-case controls label,
+    /// truncated chip).
+    #[test]
+    fn top_bar_rows_fit_the_minimum_window_when_measured() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let min_usable = 860.0 - 2.0 * 8.0;
+
+            let controls = ui
+                .horizontal(|ui| {
+                    let _ = ui.button("About");
+                    let _ = ui.button("Hide log");
+                    let _ = ui.button("Settings…");
+                    ui.separator();
+                    // Worst-case update-controls label.
+                    let _ = ui.button("Check for updates ✓");
+                    ui.min_rect()
+                })
+                .inner;
+            assert!(
+                controls.width() <= min_usable,
+                "controls row {:.0}px exceeds the {:.0}px minimum window",
+                controls.width(),
+                min_usable
+            );
+
+            let long_label = "● Incompatible: the address answered, but the response did not \
+                 look like a Remote Package Installer app, so the connection was refused \
+                 before any package was sent";
+            let identity = ui
+                .horizontal(|ui| {
+                    ui.strong("Remote Package Installer NG");
+                    ui.separator();
+                    let chip = ui
+                        .scope(|ui| {
+                            ui.set_max_width(MAX_CHIP_WIDTH);
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(long_label).weak()).truncate(),
+                            )
+                        })
+                        .inner;
+                    assert!(
+                        chip.rect.width() <= MAX_CHIP_WIDTH + 1.0,
+                        "chip {:.0}px exceeds its {:.0}px budget",
+                        chip.rect.width(),
+                        MAX_CHIP_WIDTH
+                    );
+                    ui.min_rect()
+                })
+                .inner;
+            assert!(
+                identity.width() <= min_usable,
+                "identity row {:.0}px exceeds the {:.0}px minimum window",
+                identity.width(),
+                min_usable
+            );
+
+            let gap = ui.style().spacing.item_spacing.x;
+            let single_row_needs = identity.width() + gap + controls.width();
+            assert!(
+                TOP_BAR_SINGLE_ROW_MIN_WIDTH >= single_row_needs + 30.0,
+                "threshold {:.0}px leaves <30px over the {:.0}px single-row need",
+                TOP_BAR_SINGLE_ROW_MIN_WIDTH,
+                single_row_needs
+            );
+        });
+        output.drop_without_applying_deltas();
     }
 }

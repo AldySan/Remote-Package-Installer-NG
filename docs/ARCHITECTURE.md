@@ -46,6 +46,10 @@ Linux, native on Win/macOS), `directories`.
 
 ```
 Cargo.toml                 # workspace
+packaging/                 # distribution assets, not compiled
+  icons/generate.py        # regenerates every icon format from the master PNG
+  macos/Info.plist         # .app bundle metadata for the release workflow
+  linux/                   # .desktop entry + hicolor icons for the tarball
 crates/
   rpi-ng-core/             # the entire product logic, no UI deps
     src/
@@ -70,18 +74,27 @@ crates/
       queue_test.rs
       pkg_test.rs          # generated PKG/SFO fixtures
   rpi-ng/                  # thin desktop UI
+    assets/                # brand icon: master PNG + derived .ico/.icns/window PNG
+    build.rs               # embeds the icon into the Windows .exe resource section
     src/
-      main.rs              # eframe bootstrap, theme
+      main.rs              # eframe bootstrap, window icon + app_id, theme
       app.rs               # top-level layout, engine wiring, first-run
       queue_view.rs        # virtualized queue list, per-item progress
       connect_view.rs      # discovery results + manual fallback + verification
       settings_view.rs     # settings window
       log_view.rs          # activity log panel
+    tests/
+      assets_test.rs       # pins the icon/packaging assets and their naming
 ```
 
 Dependency direction: `rpi-ng` → `rpi-ng-core`. `rpi-ng-core` never depends on egui
 and is fully usable headless (a future CLI or web frontend would sit exactly where
 `rpi-ng` sits).
+
+The icon assets are delivered through each platform's native mechanism — Win32
+resource in the `.exe`, runtime window icon for Windows/X11 title bars, `.app`
+bundle icns for macOS, `.desktop` + hicolor icons for Linux — all derived from the
+single master PNG in `rpi-ng/assets/` (see `docs/BUILDING.md`).
 
 ## 4. Core design
 
