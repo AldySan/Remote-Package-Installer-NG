@@ -49,7 +49,10 @@ Rules:
 - Monospace only for machine identifiers: URLs, content IDs, log lines.
 - Layout follows content need: the queue toolbar wraps into two rows below
   1050px of available width so it never collides at the minimum window size
-  (860x560); the threshold is pinned by measured layout tests.
+  (860x560); the threshold is pinned by measured layout tests. The top bar
+  does the same below 960px, and the console status chip truncates at 320px
+  with the full text on hover, so a long backend identity or incompatibility
+  reason can never collide with the right-aligned controls.
 - Empty, loading and error states are real screens, not afterthoughts
   ("Drop PKG files here", spinners with a label, actionable error text).
 
