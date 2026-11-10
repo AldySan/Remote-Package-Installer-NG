@@ -48,6 +48,11 @@ pub(crate) struct RowActions {
     pub move_up: bool,
     /// "Down" — reorder (never while active).
     pub move_down: bool,
+    /// Row sits at the top of the queue: "Up" renders disabled with a reason
+    /// instead of doing nothing (the engine rejects the move silently).
+    pub at_top: bool,
+    /// Row sits at the bottom of the queue: "Down" renders disabled.
+    pub at_bottom: bool,
 }
 
 impl RowActions {
@@ -62,7 +67,19 @@ impl RowActions {
             cancel: active,
             move_up: !active,
             move_down: !active,
+            at_top: false,
+            at_bottom: false,
         }
+    }
+
+    /// Position-aware variant: `is_first` / `is_last` are the item's real
+    /// position in the whole queue (not the filtered view), because that is
+    /// what the engine's `move_item` bounds itself by.
+    pub(crate) fn for_row(state: ItemState, is_first: bool, is_last: bool) -> Self {
+        let mut actions = Self::for_state(state);
+        actions.at_top = is_first;
+        actions.at_bottom = is_last;
+        actions
     }
 }
 
@@ -126,6 +143,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .filter(|(_, item)| matches_search(&needle, item))
         .map(|(idx, _)| idx)
         .collect();
+    let items_len = app.snapshot.items.len();
 
     if indices.is_empty() {
         if app.snapshot.items.is_empty() {
@@ -143,7 +161,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             for idx in indices {
                 let item = &app.snapshot.items[idx];
-                item_row(app, ui, item);
+                item_row(app, ui, item, idx == 0, idx + 1 == items_len);
                 ui.separator();
             }
         });
@@ -374,7 +392,7 @@ fn no_matches(ui: &mut egui::Ui, needle: &str) {
     });
 }
 
-fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
+fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem, is_first: bool, is_last: bool) {
     let id = item.id;
     let state = item.state;
     let color = Palette::of(ui).item_state(&state);
@@ -445,7 +463,7 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
     }
 
     // Actions.
-    let actions = RowActions::for_state(state);
+    let actions = RowActions::for_row(state, is_first, is_last);
     ui.horizontal(|ui| {
         if actions.resume_item && ui.small_button("Resume").clicked() {
             app.send(rpi_ng_core::Command::ResumeItem(id));
@@ -470,10 +488,20 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
         if actions.cancel && ui.small_button("Cancel").clicked() {
             app.send(rpi_ng_core::Command::Cancel(id));
         }
-        if actions.move_up && ui.small_button("Up").clicked() {
+        if actions.move_up
+            && ui
+                .add_enabled(!actions.at_top, egui::Button::new("Up").small())
+                .on_disabled_hover_text("Already at the top of the queue")
+                .clicked()
+        {
             app.send(rpi_ng_core::Command::Move { id, delta: -1 });
         }
-        if actions.move_down && ui.small_button("Down").clicked() {
+        if actions.move_down
+            && ui
+                .add_enabled(!actions.at_bottom, egui::Button::new("Down").small())
+                .on_disabled_hover_text("Already at the bottom of the queue")
+                .clicked()
+        {
             app.send(rpi_ng_core::Command::Move { id, delta: 1 });
         }
     });
@@ -648,6 +676,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Preparing/Submitting/Transferring/Installing: the engine owns
@@ -663,6 +693,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -676,6 +708,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -689,6 +723,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -702,6 +738,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Paused: per-item Resume (NOT whole-queue Pause) + management.
@@ -716,6 +754,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Completed/Failed/Cancelled/Invalid: only management + Retry.
@@ -730,6 +770,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -743,6 +785,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -756,6 +800,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -769,6 +815,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Unknown: user decides the outcome — Mark completed OR Retry.
@@ -783,6 +831,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
         ];
@@ -812,6 +862,25 @@ mod tests {
             assert_ne!(a.cancel, a.remove, "state {state:?}");
             assert_eq!(a.cancel, a.pause, "cancel tracks active (pause) state");
         }
+    }
+
+    #[test]
+    fn row_actions_know_the_queue_boundaries() {
+        // Middle of the queue: no caps.
+        let a = RowActions::for_row(ItemState::Queued, false, false);
+        assert!(!a.at_top && !a.at_bottom);
+        assert_eq!(a, RowActions::for_state(ItemState::Queued));
+        // First row: Up is capped; the state flags stay untouched.
+        let a = RowActions::for_row(ItemState::Queued, true, false);
+        assert!(a.at_top && !a.at_bottom);
+        assert!(a.move_up && a.move_down, "state flags remain state-only");
+        // Last row: Down is capped.
+        let a = RowActions::for_row(ItemState::Completed, false, true);
+        assert!(!a.at_top && a.at_bottom);
+        // A single-item queue caps both sides: two honest disabled buttons
+        // instead of two dead ones.
+        let a = RowActions::for_row(ItemState::Queued, true, true);
+        assert!(a.at_top && a.at_bottom);
     }
 
     // -- toolbar gating -----------------------------------------------------
