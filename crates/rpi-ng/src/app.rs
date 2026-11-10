@@ -13,8 +13,8 @@ use rpi_ng_core::{
 };
 
 use crate::{
-    connect_view, dialogs, log_view, queue_view, servercheck::ServerChecker, settings_view,
-    updater::Updater,
+    connect_view, dialogs, log_view, palette, queue_view, servercheck::ServerChecker,
+    settings_view, updater::Updater,
 };
 
 const MAX_LOG_LINES: usize = 500;
@@ -137,6 +137,13 @@ impl App {
             ThemeMode::Dark => egui::ThemePreference::Dark,
         };
         ctx.set_theme(pref);
+        // egui's dark weak text (text color x 0.6) is ~2.3:1 on the dark
+        // panel, far below WCAG AA. Raising the alpha keeps a hint of
+        // hierarchy while staying readable (see palette.rs tests). The light
+        // theme keeps egui's default, which passes comfortably.
+        ctx.style_mut_of(egui::Theme::Dark, |s| {
+            s.visuals.weak_text_alpha = palette::DARK_WEAK_TEXT_ALPHA;
+        });
     }
 
     fn poll_engine(&mut self) -> bool {
@@ -342,7 +349,7 @@ impl App {
                     .button(
                         egui::RichText::new(format!("New: {}", info.tag))
                             .strong()
-                            .color(egui::Color32::from_rgb(34, 197, 94)),
+                            .color(palette::Palette::of(ui).ok),
                     )
                     .on_hover_text("A newer release is available — click for details")
                     .clicked()
@@ -418,7 +425,7 @@ impl App {
                         ui.label(
                             egui::RichText::new(reason.clone())
                                 .small()
-                                .color(egui::Color32::from_rgb(239, 68, 68)),
+                                .color(palette::Palette::of(ui).error),
                         );
                         ui.add_space(4.0);
                         ui.label(
@@ -556,11 +563,13 @@ impl eframe::App for App {
 
 impl App {
     fn console_status_chip(&mut self, ui: &mut egui::Ui) {
-        let (color, label) = match &self.snapshot.console.status {
-            ConsoleStatus::None => (egui::Color32::GRAY, "No console".to_string()),
-            ConsoleStatus::Probing => (egui::Color32::YELLOW, "Connecting…".into()),
-            ConsoleStatus::Connected => {
-                let t = self
+        let (color, label) = {
+            let p = palette::Palette::of(ui);
+            let color = p.console_status(&self.snapshot.console.status);
+            let label = match &self.snapshot.console.status {
+                ConsoleStatus::None => "No console".to_string(),
+                ConsoleStatus::Probing => "Connecting…".into(),
+                ConsoleStatus::Connected => self
                     .snapshot
                     .console
                     .target
@@ -574,13 +583,11 @@ impl App {
                         };
                         format!("{who} ({})", t.addr)
                     })
-                    .unwrap_or_else(|| "Connected".into());
-                (egui::Color32::GREEN, t)
-            }
-            ConsoleStatus::Incompatible(reason) => {
-                (egui::Color32::RED, format!("Incompatible: {reason}"))
-            }
-            ConsoleStatus::Lost => (egui::Color32::RED, "Console lost".into()),
+                    .unwrap_or_else(|| "Connected".into()),
+                ConsoleStatus::Incompatible(reason) => format!("Incompatible: {reason}"),
+                ConsoleStatus::Lost => "Console lost".into(),
+            };
+            (color, label)
         };
         ui.colored_label(color, format!("● {label}"));
         if self.connected()
@@ -615,20 +622,6 @@ fn about_window(ctx: &egui::Context, open: &mut bool) {
                 "https://github.com/AldySan/Remote-Package-Installer-NG",
             );
         });
-}
-
-pub(crate) fn state_color(state: &ItemState) -> egui::Color32 {
-    match state {
-        ItemState::Queued => egui::Color32::GRAY,
-        ItemState::Preparing | ItemState::Submitting => egui::Color32::from_rgb(96, 165, 250),
-        ItemState::Transferring => egui::Color32::from_rgb(59, 130, 246),
-        ItemState::Installing => egui::Color32::from_rgb(147, 51, 234),
-        ItemState::Paused => egui::Color32::from_rgb(245, 158, 11),
-        ItemState::Completed => egui::Color32::from_rgb(34, 197, 94),
-        ItemState::Failed | ItemState::Invalid => egui::Color32::from_rgb(239, 68, 68),
-        ItemState::Cancelled => egui::Color32::from_rgb(120, 113, 108),
-        ItemState::Unknown => egui::Color32::from_rgb(168, 85, 247),
-    }
 }
 
 pub(crate) fn queue_summary(items: &[QueueItem]) -> String {

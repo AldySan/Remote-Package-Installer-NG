@@ -11,7 +11,7 @@ use rpi_ng_core::{
     settings::{FailurePolicy, ThemeMode},
 };
 
-use crate::app::App;
+use crate::{app::App, palette::Palette};
 
 pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
     let Some(draft) = app.settings_draft.as_mut() else {
@@ -87,22 +87,15 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                         if check_busy {
                             ui.add(egui::Spinner::new());
                         } else if let Some(result) = &check_result {
+                            let p = Palette::of(ui);
+                            let color = p.server_check(result);
                             match result {
-                                ServerCheck::Responded(code) => ui.colored_label(
-                                    egui::Color32::from_rgb(34, 197, 94),
-                                    format!("OK (HTTP {code})"),
-                                ),
-                                ServerCheck::NotRunning => {
-                                    ui.colored_label(egui::Color32::GRAY, "not running")
+                                ServerCheck::Responded(code) => {
+                                    ui.colored_label(color, format!("OK (HTTP {code})"))
                                 }
-                                ServerCheck::NoAnswer => ui.colored_label(
-                                    egui::Color32::from_rgb(245, 158, 11),
-                                    "no answer",
-                                ),
-                                ServerCheck::Error(_) => ui.colored_label(
-                                    egui::Color32::from_rgb(239, 68, 68),
-                                    "check failed",
-                                ),
+                                ServerCheck::NotRunning => ui.colored_label(color, "not running"),
+                                ServerCheck::NoAnswer => ui.colored_label(color, "no answer"),
+                                ServerCheck::Error(_) => ui.colored_label(color, "check failed"),
                             };
                         }
                     });

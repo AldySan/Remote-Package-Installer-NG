@@ -7,7 +7,7 @@ use eframe::egui;
 
 use rpi_ng_core::model::{ConsoleStatus, DiscoverySource};
 
-use crate::app::App;
+use crate::{app::App, palette::Palette};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
@@ -85,7 +85,7 @@ fn status_line(app: &mut App, ui: &mut egui::Ui) {
             egui::RichText::new(format!(
                 "The last address did not answer like an installer: {reason}"
             ))
-            .color(egui::Color32::from_rgb(239, 68, 68)),
+            .color(Palette::of(ui).error),
         );
     }
     if matches!(app.snapshot.console.status, ConsoleStatus::Lost) {
@@ -94,7 +94,7 @@ fn status_line(app: &mut App, ui: &mut egui::Ui) {
                 "The console stopped answering. Keep the installer app in the foreground on \
                  the console (the PS4 suspends background apps), then reconnect.",
             )
-            .color(egui::Color32::from_rgb(245, 158, 11)),
+            .color(Palette::of(ui).warn),
         );
     }
 }
@@ -116,7 +116,7 @@ fn candidates(app: &mut App, ui: &mut egui::Ui) {
                     DiscoverySource::Remembered => "remembered",
                     DiscoverySource::Manual => "manual",
                 };
-                ui.colored_label(egui::Color32::GREEN, "●");
+                ui.colored_label(Palette::of(ui).ok, "●");
                 ui.strong(cand.addr.to_string());
                 ui.label(
                     egui::RichText::new(format!("{} · {}", cand.kind, source))

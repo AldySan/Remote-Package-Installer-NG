@@ -17,8 +17,9 @@ use rpi_ng_core::{
 };
 
 use crate::{
-    app::{App, queue_summary, state_color},
+    app::{App, queue_summary},
     dialogs, fmt,
+    palette::Palette,
 };
 
 /// Which per-item action buttons a queue row offers, derived ONLY from the
@@ -238,20 +239,15 @@ fn server_strip(app: &mut App, ui: &mut egui::Ui) {
     };
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        ui.colored_label(egui::Color32::from_rgb(34, 197, 94), "●");
+        let p = Palette::of(ui);
+        ui.colored_label(p.ok, "●");
         ui.strong("File server");
         ui.monospace(&server.base_url);
         ui.separator();
-        ui.colored_label(
-            egui::Color32::from_rgb(34, 197, 94),
-            format!("↑ {}", fmt::mbps(server.tx_bps)),
-        )
-        .on_hover_text("Out — what the console is downloading from you (smoothed)");
-        ui.colored_label(
-            egui::Color32::from_rgb(96, 165, 250),
-            format!("↓ {}", fmt::mbps(server.rx_bps)),
-        )
-        .on_hover_text("In — request/control traffic (tiny by design)");
+        ui.colored_label(p.ok, format!("↑ {}", fmt::mbps(server.tx_bps)))
+            .on_hover_text("Out — what the console is downloading from you (smoothed)");
+        ui.colored_label(p.info, format!("↓ {}", fmt::mbps(server.rx_bps)))
+            .on_hover_text("In — request/control traffic (tiny by design)");
         let totals = format!(
             "sent {} · received {}",
             fmt::bytes(server.tx_total),
@@ -292,26 +288,24 @@ fn server_strip(app: &mut App, ui: &mut egui::Ui) {
 
 /// Compact outcome chip for the most recent self-check.
 fn check_chip(ui: &mut egui::Ui, result: &ServerCheck) {
+    let p = Palette::of(ui);
     match result {
         ServerCheck::Responded(code) => {
-            ui.colored_label(
-                egui::Color32::from_rgb(34, 197, 94),
-                format!("OK (HTTP {code})"),
-            )
-            .on_hover_text("The server answered the probe — it is running normally");
+            ui.colored_label(p.ok, format!("OK (HTTP {code})"))
+                .on_hover_text("The server answered the probe — it is running normally");
         }
         ServerCheck::NotRunning => {
-            ui.colored_label(egui::Color32::GRAY, "not running")
-                .on_hover_text(
-                    "Nothing is listening — the server starts with a console connection",
-                );
+            ui.colored_label(p.neutral, "not running").on_hover_text(
+                "Nothing is listening — the server starts with a console connection",
+            );
         }
         ServerCheck::NoAnswer => {
-            ui.colored_label(egui::Color32::from_rgb(245, 158, 11), "no answer")
-                .on_hover_text("The port accepted the connection but never replied — a firewall or antivirus may be intercepting it");
+            ui.colored_label(p.warn, "no answer").on_hover_text(
+                "The port accepted the connection but never replied — a firewall or antivirus may be intercepting it",
+            );
         }
         ServerCheck::Error(e) => {
-            ui.colored_label(egui::Color32::from_rgb(239, 68, 68), "check failed")
+            ui.colored_label(p.error, "check failed")
                 .on_hover_text(format!("Unexpected I/O error: {e}"));
         }
     }
@@ -358,7 +352,7 @@ fn no_matches(ui: &mut egui::Ui, needle: &str) {
 fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
     let id = item.id;
     let state = item.state;
-    let color = state_color(&state);
+    let color = Palette::of(ui).item_state(&state);
     let primary = item.primary_part();
     let title = primary
         .map(|p| p.display_title())
@@ -382,7 +376,7 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
                         ui.label(
                             egui::RichText::new("patch")
                                 .small()
-                                .color(egui::Color32::from_rgb(245, 158, 11)),
+                                .color(Palette::of(ui).warn),
                         );
                     }
                     if let Some(kind) = p.content_kind.package_type() {
@@ -421,7 +415,7 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
         ui.label(
             egui::RichText::new(err)
                 .small()
-                .color(egui::Color32::from_rgb(239, 68, 68)),
+                .color(Palette::of(ui).error),
         );
     }
 
