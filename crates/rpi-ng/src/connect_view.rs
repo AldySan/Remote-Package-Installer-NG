@@ -10,6 +10,19 @@ use rpi_ng_core::model::{ConsoleStatus, DiscoverySource};
 use crate::{app::App, palette::Palette};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    // Scrolled, not squeezed: with a handful of discovered and remembered
+    // consoles the content measures taller than the central panel at the
+    // 860x560 minimum window (446px of content against roughly 380px with
+    // the log panel open), which used to push the manual-address fallback
+    // and the troubleshooting section out of reach with no way back.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            content(app, ui);
+        });
+}
+
+fn content(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
         .inner_margin(egui::Margin::same(24))
         .corner_radius(8.0);
