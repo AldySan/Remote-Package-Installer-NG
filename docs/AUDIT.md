@@ -846,3 +846,60 @@ changed.
   sanitization integration tests and the UI-state unit tests;
   `cargo fmt --check` clean; `cargo clippy --workspace --all-targets` zero
   warnings; no `unsafe`, no new dependencies.
+
+## 14. Addendum — app icon across platforms (post-v0.0.8, dev)
+
+Prompted by a user report after v0.0.8: on Windows the `.exe` showed the
+generic default executable icon in Explorer, while the running window did
+show an icon. Root cause: the repo shipped no icon of its own at all — the
+icon users saw at runtime was egui-winit's built-in default logo, and
+nothing was embedded in the binary's Win32 resource section.
+
+### Fixed findings
+
+**P1 — no brand icon anywhere (main.rs, build.rs, packaging/).** The app now
+has one icon, `crates/rpi-ng/assets/icon.png`, delivered through each
+platform's native mechanism:
+
+- Windows: `build.rs` embeds a multi-size `icon.ico` into the `.exe` resource
+  section via `winresource` (Windows targets only; build script is a no-op
+  elsewhere), plus FileDescription/ProductName/version strings for Task
+  Manager and Explorer metadata. Explorer, the taskbar and jumplists now
+  show the brand icon before any window exists.
+- Windows/X11 runtime: `main.rs` decodes the embedded 256 px PNG and passes
+  it as the egui window icon (`ViewportBuilder::with_icon`) — title bar and
+  taskbar.
+- macOS: winit cannot set window icons on macOS at all, so a bare binary has
+  no icon there either — same class of bug, worse. The release workflow now
+  builds a proper `RemotePackageInstallerNG.app` bundle (universal lipo
+  binary, `Info.plist`, `AppIcon.icns`, ad-hoc codesign, zip) so Finder,
+  Dock and cmd-tab show the icon.
+- Linux: ELF executables carry no file icon by design, so file managers will
+  always show a generic one for the binary itself — the honest equivalent of
+  the fix is desktop integration. The tarball now ships a `.desktop` entry
+  plus hicolor icons (`packaging/linux/`), and `main.rs` sets the app_id to
+  the binary name so X11 docks (WM_CLASS) and Wayland compositors (app_id)
+  resolve the window's icon from the desktop entry.
+
+### Intentional trade-offs
+
+- One new direct dependency (`image`, png-only features, already in the
+  dependency graph through egui's clipboard support) to decode the embedded
+  window icon, and one build-only dependency (`winresource`) that never
+  touches the shipped binary on Linux/macOS.
+- The macOS bundle is ad-hoc signed only; Gatekeeper's first-run prompt is
+  unchanged from the previous unsigned bare binaries.
+- The `.ico` entries are PNG-encoded (Vista+), not BMP — fine for every
+  supported Windows version, smaller files.
+
+### Verification
+
+- 130/130 tests green (`cargo test --workspace`), including six new asset
+  guards in `crates/rpi-ng/tests/assets_test.rs` (ICO container walk, ICNS
+  container walk, runtime PNG decode through the same `image` call `main.rs`
+  makes, desktop-entry keys, Info.plist wiring, master size), plus the
+  naming convention pin (binary == app_id == `Icon=` == `StartupWMClass`);
+  `cargo fmt --check` clean; `cargo clippy --workspace --all-targets` zero
+  warnings; no `unsafe`.
+- Windows resource embedding itself is exercised by CI (the 3-OS matrix
+  builds the crate on `windows-latest`, which runs the same build script).

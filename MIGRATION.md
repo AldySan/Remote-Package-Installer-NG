@@ -50,12 +50,20 @@ with those tools; you can still drag files from anywhere into the queue.
 
 ## Where your data lives
 
-- Queue and settings are stored per-user:
-  - Linux: `~/.local/share/rpi-ng/`
-  - Windows: `%APPDATA%\rpi-ng\` (per `directories` crate)
-  - macOS: `~/Library/Application Support/rpi-ng/`
-- `queue.json` and `settings.json` are plain JSON with atomic writes and a
-  `.bak` fallback — you can inspect, back up, or delete them freely.
+The app is portable: `queue.json` and `settings.json` are stored as plain
+JSON **next to the executable**, in the same folder you unpacked it into.
+Copy the folder and your setup travels with it; the activity log reports
+the exact location on every start.
+
+- Both files are plain JSON with atomic writes and a `.bak` fallback, so you
+  can inspect, back up or delete them freely.
+- If you used a version older than v0.0.3, your files are moved once from
+  the old per-user location (`~/.local/share/rpi-ng/` on Linux,
+  `%APPDATA%\rpi-ng\` on Windows, `~/Library/Application Support/rpi-ng/`
+  on macOS) into the folder beside the executable. Existing files are never
+  overwritten.
+- The `RPI_NG_DATA_DIR` environment variable overrides the location when
+  you need one; mostly useful for tests and unusual setups.
 
 ## Console-side tips that still matter
 

@@ -31,7 +31,7 @@ pub enum UpdateError {
     Network(#[from] reqwest::Error),
     #[error("unexpected API status {status}: {message}")]
     Api { status: u16, message: String },
-    #[error("GitHub API rate limit exceeded — try again later")]
+    #[error("GitHub API rate limit exceeded; try again later")]
     RateLimited,
     #[error("malformed release response: {0}")]
     Malformed(&'static str),

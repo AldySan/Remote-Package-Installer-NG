@@ -7,7 +7,9 @@
 //! during the fourth audit round: a plain row is ~88px, one with an error
 //! line ~101px. egui lays out thousands of widgets per frame comfortably,
 //! and the log panel already renders up to 500 entries unvirtualized, so the
-//! simplicity is the right trade here.
+//! simplicity is the right trade here. Rows with a live progress bar render
+//! two extra lines (the bar, then the transferred/speed readout) so they can
+//! never push their readout past the fixed right-hand column.
 
 use eframe::egui;
 
@@ -17,8 +19,9 @@ use rpi_ng_core::{
 };
 
 use crate::{
-    app::{App, queue_summary, state_color},
+    app::{App, queue_summary},
     dialogs, fmt,
+    palette::Palette,
 };
 
 /// Which per-item action buttons a queue row offers, derived ONLY from the
@@ -47,6 +50,11 @@ pub(crate) struct RowActions {
     pub move_up: bool,
     /// "Down" — reorder (never while active).
     pub move_down: bool,
+    /// Row sits at the top of the queue: "Up" renders disabled with a reason
+    /// instead of doing nothing (the engine rejects the move silently).
+    pub at_top: bool,
+    /// Row sits at the bottom of the queue: "Down" renders disabled.
+    pub at_bottom: bool,
 }
 
 impl RowActions {
@@ -61,7 +69,19 @@ impl RowActions {
             cancel: active,
             move_up: !active,
             move_down: !active,
+            at_top: false,
+            at_bottom: false,
         }
+    }
+
+    /// Position-aware variant: `is_first` / `is_last` are the item's real
+    /// position in the whole queue (not the filtered view), because that is
+    /// what the engine's `move_item` bounds itself by.
+    pub(crate) fn for_row(state: ItemState, is_first: bool, is_last: bool) -> Self {
+        let mut actions = Self::for_state(state);
+        actions.at_top = is_first;
+        actions.at_bottom = is_last;
+        actions
     }
 }
 
@@ -125,6 +145,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .filter(|(_, item)| matches_search(&needle, item))
         .map(|(idx, _)| idx)
         .collect();
+    let items_len = app.snapshot.items.len();
 
     if indices.is_empty() {
         if app.snapshot.items.is_empty() {
@@ -142,7 +163,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             for idx in indices {
                 let item = &app.snapshot.items[idx];
-                item_row(app, ui, item);
+                item_row(app, ui, item, idx == 0, idx + 1 == items_len);
                 ui.separator();
             }
         });
@@ -162,70 +183,106 @@ fn matches_search(needle: &str, item: &QueueItem) -> bool {
         .any(|hay| hay.to_lowercase().contains(needle))
 }
 
+/// Below this available width the toolbar wraps into two rows. Measured
+/// headlessly with real egui metrics (see the layout tests): the buttons
+/// need 575px in the worst case ("Queue running" label) and the right-aligned
+/// search + summary group 431px (6-digit counts), so a single row needs
+/// ~1015px. The 1120px default window stays single-row; the 860px minimum
+/// window wraps.
+const SINGLE_ROW_MIN_WIDTH: f32 = 1050.0;
+
+fn two_row_toolbar(available_width: f32) -> bool {
+    available_width < SINGLE_ROW_MIN_WIDTH
+}
+
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        let tb = ToolbarState::derive(
-            app.snapshot.engine_busy,
-            app.dialog.is_some(),
-            &app.snapshot.items,
-        );
-
-        if ui
-            .add_enabled(tb.can_add, egui::Button::new("Add PKG files…"))
-            .on_hover_text("Select one or more .pkg files")
-            .on_disabled_hover_text(tb.add_disabled_reason)
-            .clicked()
-        {
-            app.dialog = Some(dialogs::pick_pkg_files());
-        }
-        if ui
-            .add_enabled(tb.can_add, egui::Button::new("Add folder…"))
-            .on_hover_text("Scan a folder for packages")
-            .on_disabled_hover_text(tb.add_disabled_reason)
-            .clicked()
-        {
-            app.dialog = Some(dialogs::pick_folder());
-        }
-        ui.separator();
-
-        if ui
-            .add_enabled(tb.can_start, egui::Button::new(tb.start_label))
-            .on_hover_text("Install queued items in order")
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::Start);
-        }
-        if ui
-            .add_enabled(tb.can_pause, egui::Button::new("Pause"))
-            .on_hover_text("Pause the active console task and stop auto-advance")
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::Pause);
-        }
-        if ui
-            .add_enabled(tb.can_resume, egui::Button::new("Resume"))
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::Resume);
-        }
-        ui.separator();
-        if ui
-            .add_enabled(tb.can_clear_finished, egui::Button::new("Clear finished"))
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::ClearFinished);
-        }
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let summary = queue_summary(&app.snapshot.items);
-            ui.label(egui::RichText::new(summary).small().weak());
-            ui.add(
-                egui::TextEdit::singleline(&mut app.search)
-                    .hint_text("Search queue…")
-                    .desired_width(180.0),
-            );
+    let tb = ToolbarState::derive(
+        app.snapshot.engine_busy,
+        app.dialog.is_some(),
+        &app.snapshot.items,
+    );
+    if two_row_toolbar(ui.available_width()) {
+        // Narrow: buttons get their own row, search + summary the next one,
+        // so the right-aligned group can never paint over the buttons.
+        ui.horizontal(|ui| toolbar_buttons(app, ui, &tb));
+        ui.horizontal(|ui| toolbar_search(app, ui));
+    } else {
+        ui.horizontal(|ui| {
+            toolbar_buttons(app, ui, &tb);
+            toolbar_search(app, ui);
         });
+    }
+}
+
+fn toolbar_buttons(app: &mut App, ui: &mut egui::Ui, tb: &ToolbarState) {
+    if ui
+        .add_enabled(tb.can_add, egui::Button::new("Add PKG files…"))
+        .on_hover_text("Select one or more .pkg files")
+        .on_disabled_hover_text(tb.add_disabled_reason)
+        .clicked()
+    {
+        app.dialog = Some(dialogs::pick_pkg_files());
+    }
+    if ui
+        .add_enabled(tb.can_add, egui::Button::new("Add folder…"))
+        .on_hover_text("Scan a folder for packages")
+        .on_disabled_hover_text(tb.add_disabled_reason)
+        .clicked()
+    {
+        app.dialog = Some(dialogs::pick_folder());
+    }
+    ui.separator();
+
+    if ui
+        .add_enabled(tb.can_start, egui::Button::new(tb.start_label))
+        .on_hover_text("Install queued items in order")
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::Start);
+    }
+    if ui
+        .add_enabled(tb.can_pause, egui::Button::new("Pause"))
+        .on_hover_text("Pause the active console task and stop auto-advance")
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::Pause);
+    }
+    if ui
+        .add_enabled(tb.can_resume, egui::Button::new("Resume"))
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::Resume);
+    }
+    ui.separator();
+    if ui
+        .add_enabled(tb.can_clear_finished, egui::Button::new("Clear finished"))
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::ClearFinished);
+    }
+}
+
+fn toolbar_search(app: &mut App, ui: &mut egui::Ui) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let summary = queue_summary(&app.snapshot.items);
+        ui.label(egui::RichText::new(summary).small().weak());
+        ui.add(
+            egui::TextEdit::singleline(&mut app.search)
+                .hint_text("Search queue…")
+                .desired_width(180.0),
+        );
     });
+}
+
+/// Below this available width the server strip wraps into two rows.
+/// Measured headlessly with real egui metrics (see the layout tests): the
+/// rates group needs ~463px in the worst case and the controls group
+/// ~433px, so a single row needs ~903px. The 1120px default window stays
+/// single-row; the 860px minimum wraps.
+const SERVER_STRIP_SINGLE_ROW_MIN_WIDTH: f32 = 940.0;
+
+fn two_row_server_strip(available_width: f32) -> bool {
+    available_width < SERVER_STRIP_SINGLE_ROW_MIN_WIDTH
 }
 
 /// Live file-server line: where packages are served from, live in/out
@@ -237,81 +294,96 @@ fn server_strip(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        ui.colored_label(egui::Color32::from_rgb(34, 197, 94), "●");
-        ui.strong("File server");
-        ui.monospace(&server.base_url);
-        ui.separator();
-        ui.colored_label(
-            egui::Color32::from_rgb(34, 197, 94),
-            format!("↑ {}", fmt::mbps(server.tx_bps)),
-        )
-        .on_hover_text("Out — what the console is downloading from you (smoothed)");
-        ui.colored_label(
-            egui::Color32::from_rgb(96, 165, 250),
-            format!("↓ {}", fmt::mbps(server.rx_bps)),
-        )
-        .on_hover_text("In — request/control traffic (tiny by design)");
-        let totals = format!(
-            "sent {} · received {}",
-            fmt::bytes(server.tx_total),
-            fmt::bytes(server.rx_total)
-        );
-
-        // Right side: self-check button + outcome chip + session totals.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let busy = app.server_checker.busy;
-            let label = if busy {
-                "Checking…"
-            } else {
-                "Check File Server"
-            };
-            if ui
-                .button(label)
-                .on_hover_text(
-                    "Test whether the app's own file server is answering on this \
-                     computer — if it is OK but the console still cannot download, the \
-                     block is between the two machines (firewall / network)",
-                )
-                .clicked()
-            {
-                // Probe the actual bound address: the server usually binds a
-                // specific interface (the one that can reach the console),
-                // which a loopback probe would wrongly report as dead.
-                app.server_checker.kick(server.bind);
-            }
-            if busy {
-                ui.add(egui::Spinner::new());
-            } else if let Some(result) = app.server_check_result.clone() {
-                check_chip(ui, &result);
-            }
-            ui.label(egui::RichText::new(totals).weak());
+    if two_row_server_strip(ui.available_width()) {
+        // Narrow: the rates row and the controls row split, so the session
+        // totals can never paint over the URL and transfer rates.
+        ui.horizontal(|ui| {
+            server_strip_rates(ui, &server);
         });
+        ui.horizontal(|ui| {
+            server_strip_controls(app, ui, &server);
+        });
+    } else {
+        ui.horizontal(|ui| {
+            server_strip_rates(ui, &server);
+            server_strip_controls(app, ui, &server);
+        });
+    }
+}
+
+/// Left group: serving URL plus live transfer rates.
+fn server_strip_rates(ui: &mut egui::Ui, server: &rpi_ng_core::model::ServerInfo) {
+    let p = Palette::of(ui);
+    ui.colored_label(p.ok, "●");
+    ui.strong("File server");
+    ui.monospace(&server.base_url);
+    ui.separator();
+    ui.colored_label(p.ok, format!("↑ {}", fmt::mbps(server.tx_bps)))
+        .on_hover_text("Out: what the console is downloading from you (smoothed)");
+    ui.colored_label(p.info, format!("↓ {}", fmt::mbps(server.rx_bps)))
+        .on_hover_text("In: request/control traffic (tiny by design)");
+}
+
+/// Right group: self-check button + outcome chip + session totals.
+fn server_strip_controls(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    server: &rpi_ng_core::model::ServerInfo,
+) {
+    let totals = format!(
+        "sent {} · received {}",
+        fmt::bytes(server.tx_total),
+        fmt::bytes(server.rx_total)
+    );
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let busy = app.server_checker.busy;
+        let label = if busy {
+            "Checking…"
+        } else {
+            "Check File Server"
+        };
+        if ui
+            .button(label)
+            .on_hover_text(
+                "Test whether the app's own file server is answering on this \
+                 computer. If it is OK but the console still cannot download, the \
+                 block is between the two machines (firewall / network)",
+            )
+            .clicked()
+        {
+            // Probe the actual bound address: the server usually binds a
+            // specific interface (the one that can reach the console),
+            // which a loopback probe would wrongly report as dead.
+            app.server_checker.kick(server.bind);
+        }
+        if busy {
+            ui.add(egui::Spinner::new());
+        } else if let Some(result) = app.server_check_result.clone() {
+            check_chip(ui, &result);
+        }
+        ui.label(egui::RichText::new(totals).weak());
     });
 }
 
 /// Compact outcome chip for the most recent self-check.
 fn check_chip(ui: &mut egui::Ui, result: &ServerCheck) {
+    let p = Palette::of(ui);
     match result {
         ServerCheck::Responded(code) => {
-            ui.colored_label(
-                egui::Color32::from_rgb(34, 197, 94),
-                format!("OK (HTTP {code})"),
-            )
-            .on_hover_text("The server answered the probe — it is running normally");
+            ui.colored_label(p.ok, format!("OK (HTTP {code})"))
+                .on_hover_text("The server answered the probe: it is running normally");
         }
         ServerCheck::NotRunning => {
-            ui.colored_label(egui::Color32::GRAY, "not running")
-                .on_hover_text(
-                    "Nothing is listening — the server starts with a console connection",
-                );
+            ui.colored_label(p.neutral, "not running")
+                .on_hover_text("Nothing is listening: the server starts with a console connection");
         }
         ServerCheck::NoAnswer => {
-            ui.colored_label(egui::Color32::from_rgb(245, 158, 11), "no answer")
-                .on_hover_text("The port accepted the connection but never replied — a firewall or antivirus may be intercepting it");
+            ui.colored_label(p.warn, "no answer").on_hover_text(
+                "The port accepted the connection but never replied: a firewall or antivirus may be intercepting it",
+            );
         }
         ServerCheck::Error(e) => {
-            ui.colored_label(egui::Color32::from_rgb(239, 68, 68), "check failed")
+            ui.colored_label(p.error, "check failed")
                 .on_hover_text(format!("Unexpected I/O error: {e}"));
         }
     }
@@ -355,14 +427,14 @@ fn no_matches(ui: &mut egui::Ui, needle: &str) {
     });
 }
 
-fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
+fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem, is_first: bool, is_last: bool) {
     let id = item.id;
     let state = item.state;
-    let color = state_color(&state);
+    let color = Palette::of(ui).item_state(&state);
     let primary = item.primary_part();
     let title = primary
         .map(|p| p.display_title())
-        .unwrap_or_else(|| "—".into());
+        .unwrap_or_else(|| "No name".into());
     let size = fmt::bytes(item.total_size());
 
     ui.horizontal(|ui| {
@@ -382,7 +454,7 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
                         ui.label(
                             egui::RichText::new("patch")
                                 .small()
-                                .color(egui::Color32::from_rgb(245, 158, 11)),
+                                .color(Palette::of(ui).warn),
                         );
                     }
                     if let Some(kind) = p.content_kind.package_type() {
@@ -421,12 +493,12 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
         ui.label(
             egui::RichText::new(err)
                 .small()
-                .color(egui::Color32::from_rgb(239, 68, 68)),
+                .color(Palette::of(ui).error),
         );
     }
 
     // Actions.
-    let actions = RowActions::for_state(state);
+    let actions = RowActions::for_row(state, is_first, is_last);
     ui.horizontal(|ui| {
         if actions.resume_item && ui.small_button("Resume").clicked() {
             app.send(rpi_ng_core::Command::ResumeItem(id));
@@ -451,10 +523,20 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
         if actions.cancel && ui.small_button("Cancel").clicked() {
             app.send(rpi_ng_core::Command::Cancel(id));
         }
-        if actions.move_up && ui.small_button("Up").clicked() {
+        if actions.move_up
+            && ui
+                .add_enabled(!actions.at_top, egui::Button::new("Up").small())
+                .on_disabled_hover_text("Already at the top of the queue")
+                .clicked()
+        {
             app.send(rpi_ng_core::Command::Move { id, delta: -1 });
         }
-        if actions.move_down && ui.small_button("Down").clicked() {
+        if actions.move_down
+            && ui
+                .add_enabled(!actions.at_bottom, egui::Button::new("Down").small())
+                .on_disabled_hover_text("Already at the bottom of the queue")
+                .clicked()
+        {
             app.send(rpi_ng_core::Command::Move { id, delta: 1 });
         }
     });
@@ -463,42 +545,44 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
 fn state_and_progress(ui: &mut egui::Ui, item: &QueueItem, color: egui::Color32) {
     ui.horizontal(|ui| {
         ui.colored_label(color, item.state.label());
-        if let Some(p) = &item.progress {
-            if item.state == ItemState::Transferring || item.state == ItemState::Installing {
-                let pct = p.percent;
-                let bar = egui::ProgressBar::new(pct.clamp(0.0, 100.0) / 100.0)
-                    .text(format!(
-                        "{pct:.1}% · {}{}",
-                        fmt::bytes(p.transferred),
-                        eta_suffix(p),
-                    ))
-                    .desired_height(14.0);
-                ui.add(bar);
-                let speed = if p.speed_bps > 0 {
-                    format!(" · {}", fmt::bps(p.speed_bps))
-                } else {
-                    String::new()
-                };
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} / {}{speed}",
-                        fmt::bytes(p.transferred),
-                        fmt::bytes(p.total)
-                    ))
-                    .small()
-                    .weak(),
-                );
-            } else if p.preparing_percent > 0 && p.preparing_percent < 100 {
-                ui.label(
-                    egui::RichText::new(format!("preparing {}%", p.preparing_percent))
-                        .small()
-                        .weak(),
-                );
-            }
-        } else if item.state == ItemState::Submitting {
+        if item.progress.is_none() && item.state == ItemState::Submitting {
             ui.add(egui::Spinner::new());
         }
     });
+    let Some(p) = &item.progress else { return };
+    if item.state == ItemState::Transferring || item.state == ItemState::Installing {
+        let pct = p.percent;
+        // egui's ProgressBar claims ALL remaining width when no desired
+        // width is set, so anything placed after it in the same horizontal
+        // paints past the fixed 230px right-hand column (measured: the old
+        // single-row layout needed 365px). The bar gets its own row and
+        // the readout wraps below it instead.
+        let bar = egui::ProgressBar::new(pct.clamp(0.0, 100.0) / 100.0)
+            .text(format!("{pct:.1}%"))
+            .desired_height(14.0);
+        ui.add(bar);
+        let speed = if p.speed_bps > 0 {
+            format!(" · {}", fmt::bps(p.speed_bps))
+        } else {
+            String::new()
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "{} / {}{speed}{}",
+                fmt::bytes(p.transferred),
+                fmt::bytes(p.total),
+                eta_suffix(p),
+            ))
+            .small()
+            .weak(),
+        );
+    } else if p.preparing_percent > 0 && p.preparing_percent < 100 {
+        ui.label(
+            egui::RichText::new(format!("preparing {}%", p.preparing_percent))
+                .small()
+                .weak(),
+        );
+    }
 }
 
 fn eta_suffix(p: &ProgressView) -> String {
@@ -629,6 +713,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Preparing/Submitting/Transferring/Installing: the engine owns
@@ -644,6 +730,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -657,6 +745,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -670,6 +760,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -683,6 +775,8 @@ mod tests {
                     cancel: true,
                     move_up: false,
                     move_down: false,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Paused: per-item Resume (NOT whole-queue Pause) + management.
@@ -697,6 +791,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Completed/Failed/Cancelled/Invalid: only management + Retry.
@@ -711,6 +807,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -724,6 +822,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -737,6 +837,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             (
@@ -750,6 +852,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
             // Unknown: user decides the outcome — Mark completed OR Retry.
@@ -764,6 +868,8 @@ mod tests {
                     cancel: false,
                     move_up: true,
                     move_down: true,
+                    at_top: false,
+                    at_bottom: false,
                 },
             ),
         ];
@@ -793,6 +899,25 @@ mod tests {
             assert_ne!(a.cancel, a.remove, "state {state:?}");
             assert_eq!(a.cancel, a.pause, "cancel tracks active (pause) state");
         }
+    }
+
+    #[test]
+    fn row_actions_know_the_queue_boundaries() {
+        // Middle of the queue: no caps.
+        let a = RowActions::for_row(ItemState::Queued, false, false);
+        assert!(!a.at_top && !a.at_bottom);
+        assert_eq!(a, RowActions::for_state(ItemState::Queued));
+        // First row: Up is capped; the state flags stay untouched.
+        let a = RowActions::for_row(ItemState::Queued, true, false);
+        assert!(a.at_top && !a.at_bottom);
+        assert!(a.move_up && a.move_down, "state flags remain state-only");
+        // Last row: Down is capped.
+        let a = RowActions::for_row(ItemState::Completed, false, true);
+        assert!(!a.at_top && a.at_bottom);
+        // A single-item queue caps both sides: two honest disabled buttons
+        // instead of two dead ones.
+        let a = RowActions::for_row(ItemState::Queued, true, true);
+        assert!(a.at_top && a.at_bottom);
     }
 
     // -- toolbar gating -----------------------------------------------------
@@ -860,5 +985,242 @@ mod tests {
         assert_eq!(tb.add_disabled_reason, "Close the open file dialog first");
         // Start does not depend on the dialog.
         assert!(tb.can_start);
+    }
+
+    // -- toolbar layout (R-03: no collisions at the 860x560 minimum) -------
+
+    #[test]
+    fn toolbar_wraps_below_the_single_row_threshold() {
+        // Usable central-panel width at the 860x560 minimum window
+        // (8px panel margin each side) and at the 1120x760 default.
+        assert!(two_row_toolbar(844.0), "minimum window must wrap");
+        assert!(!two_row_toolbar(1104.0), "default window stays single-row");
+        assert!(!two_row_toolbar(SINGLE_ROW_MIN_WIDTH));
+        assert!(
+            !two_row_toolbar(1920.0 - 16.0),
+            "wide windows stay single-row"
+        );
+    }
+
+    /// Measured with real egui metrics (headless pass), not estimates: the
+    /// two wrapped rows must fit the minimum window, and the single-row
+    /// threshold must cover what the single row actually needs.
+    #[test]
+    fn toolbar_rows_fit_the_minimum_window_when_measured() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let min_usable = 860.0 - 2.0 * 8.0;
+            let buttons_row = ui
+                .horizontal(|ui| {
+                    for label in [
+                        "Add PKG files…",
+                        "Add folder…",
+                        "Queue running",
+                        "Pause",
+                        "Resume",
+                        "Clear finished",
+                    ] {
+                        let _ = ui.button(label);
+                    }
+                    ui.separator();
+                    ui.separator();
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE buttons_row {:.0}", buttons_row.width());
+            assert!(
+                buttons_row.width() <= min_usable,
+                "buttons row {:.0}px exceeds the {:.0}px minimum window",
+                buttons_row.width(),
+                min_usable
+            );
+
+            let search_row = ui
+                .horizontal(|ui| {
+                    // Worst-case summary text (6-digit counts in every slot).
+                    ui.label(
+                        egui::RichText::new(
+                            "999999 item(s) · 999999 done · 999999 active · 999999 failed",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    let mut search = String::new();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut search)
+                            .hint_text("Search queue…")
+                            .desired_width(180.0),
+                    );
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE search_row {:.0}", search_row.width());
+            assert!(
+                search_row.width() <= min_usable,
+                "search row {:.0}px exceeds the {:.0}px minimum window",
+                search_row.width(),
+                min_usable
+            );
+
+            // A single row needs both groups plus one inter-group gap; the
+            // threshold must cover it or the wrap would be pointless. The
+            // 30px headroom absorbs small metric drift across platforms.
+            let gap = ui.style().spacing.item_spacing.x;
+            let single_row_needs = buttons_row.width() + gap + search_row.width();
+            assert!(
+                SINGLE_ROW_MIN_WIDTH >= single_row_needs + 30.0,
+                "threshold {:.0}px leaves <30px over the {:.0}px single-row need",
+                SINGLE_ROW_MIN_WIDTH,
+                single_row_needs
+            );
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    // -- progress readout stays inside its column (R-03) -------------------
+
+    fn item_with_progress(state: ItemState) -> QueueItem {
+        let mut item = item_with(0, state);
+        item.progress = Some(ProgressView {
+            percent: 45.3,
+            transferred: 26_367_164_620,
+            total: 53_687_091_200,
+            speed_bps: 117_000_000,
+            eta_sec: Some(302),
+            piece_index: 0,
+            piece_total: 1,
+            preparing_percent: 100,
+            local_copy_percent: 0,
+            raw_error: 0,
+        });
+        item
+    }
+
+    /// The right-hand column of a queue row is a fixed 230px. The progress
+    /// bar claims all remaining width of its row, so the size/speed readout
+    /// must live on its own line below it: the pre-fix single-row layout
+    /// measured 365px and painted the readout 135px past the column edge,
+    /// clipped by the central panel.
+    #[test]
+    fn progress_readout_stays_inside_the_column() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for state in [ItemState::Transferring, ItemState::Installing] {
+                let item = item_with_progress(state);
+                let rect = ui
+                    .allocate_ui(egui::vec2(230.0, 300.0), |ui| {
+                        state_and_progress(ui, &item, egui::Color32::WHITE);
+                        ui.min_rect()
+                    })
+                    .inner;
+                assert!(
+                    rect.width() <= 230.0 + 1.0,
+                    "{state:?} progress row {:.0}px overflows the 230px column",
+                    rect.width()
+                );
+            }
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    /// The readout must keep carrying every number the old layout showed:
+    /// percent, transferred, total, speed and ETA (the transferred bytes
+    /// used to be printed twice; now they appear once).
+    #[test]
+    fn progress_readout_shows_all_the_numbers() {
+        // The bar text is "{pct:.1}%"; the readout line is built from the
+        // same fmt helpers the row renders with, so pin their combination.
+        let p = ProgressView {
+            percent: 45.3,
+            transferred: 26_367_164_620,
+            total: 53_687_091_200,
+            speed_bps: 117_000_000,
+            eta_sec: Some(302),
+            piece_index: 0,
+            piece_total: 1,
+            preparing_percent: 100,
+            local_copy_percent: 0,
+            raw_error: 0,
+        };
+        let speed = format!(" · {}", fmt::bps(p.speed_bps));
+        let readout = format!(
+            "{} / {}{speed}{}",
+            fmt::bytes(p.transferred),
+            fmt::bytes(p.total),
+            eta_suffix(&p)
+        );
+        for part in ["24.6 GiB", "50.0 GiB", "111.6 MiB/s", "5m 02s"] {
+            assert!(readout.contains(part), "readout {readout} lacks {part}");
+        }
+    }
+
+    // -- server strip fits the minimum window (R-03) ------------------------
+
+    #[test]
+    fn server_strip_wraps_below_its_threshold() {
+        assert!(two_row_server_strip(844.0), "minimum window must wrap");
+        assert!(
+            !two_row_server_strip(1104.0),
+            "default window stays single-row"
+        );
+        assert!(!two_row_server_strip(SERVER_STRIP_SINGLE_ROW_MIN_WIDTH));
+    }
+
+    /// Measured with real egui metrics, not estimates: the wrapped rows must
+    /// fit the 860x560 minimum window, and the single-row threshold must
+    /// cover what the single row actually needs (worst-case rates, chip and
+    /// totals).
+    #[test]
+    fn server_strip_rows_fit_the_minimum_window_when_measured() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let min_usable = 860.0 - 2.0 * 8.0;
+
+            let rates = ui
+                .horizontal(|ui| {
+                    ui.colored_label(egui::Color32::WHITE, "●");
+                    ui.strong("File server");
+                    ui.monospace("http://192.168.1.42:12899/");
+                    ui.separator();
+                    ui.colored_label(egui::Color32::WHITE, "↑ 1000 Mbps");
+                    ui.colored_label(egui::Color32::WHITE, "↓ 1000 Mbps");
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE server rates row {:.0}", rates.width());
+            assert!(
+                rates.width() <= min_usable,
+                "rates row {:.0}px exceeds the {:.0}px minimum window",
+                rates.width(),
+                min_usable
+            );
+
+            let controls = ui
+                .horizontal(|ui| {
+                    let _ = ui.button("Check File Server");
+                    ui.colored_label(egui::Color32::WHITE, "OK (HTTP 400)");
+                    ui.label("sent 1023.9 GiB · received 1023.9 MiB");
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE server controls row {:.0}", controls.width());
+            assert!(
+                controls.width() <= min_usable,
+                "controls row {:.0}px exceeds the {:.0}px minimum window",
+                controls.width(),
+                min_usable
+            );
+
+            let gap = ui.style().spacing.item_spacing.x;
+            let single_row_needs = rates.width() + gap + controls.width();
+            eprintln!("MEASURE server single-row need {:.0}", single_row_needs);
+            assert!(
+                SERVER_STRIP_SINGLE_ROW_MIN_WIDTH >= single_row_needs + 30.0,
+                "threshold {:.0}px leaves <30px over the {:.0}px single-row need",
+                SERVER_STRIP_SINGLE_ROW_MIN_WIDTH,
+                single_row_needs
+            );
+        });
+        output.drop_without_applying_deltas();
     }
 }

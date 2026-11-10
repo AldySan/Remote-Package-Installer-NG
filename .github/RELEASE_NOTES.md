@@ -1,15 +1,23 @@
-A hardening release for the queue file. The queue lives next to the app as plain JSON, and a hand-edited or otherwise damaged copy could break the app in confusing ways — rows that answered to the wrong buttons, or entries that vanished. That file is now checked and repaired safely on startup, with every repair explained in the activity panel. No settings or workflow changes.
+A look-and-feel release. The app now ships its own icon on every platform, every status color stays readable in both light and dark themes, and the whole interface keeps working at its smallest documented window size. No settings or workflow changes.
+
+## Added
+
+- **The app has its own icon everywhere.** After v0.0.8 the Windows `.exe` still showed the generic executable icon in Explorer, and macOS showed none at all. The app now embeds a brand icon in the binary, so it appears on the `.exe` file, taskbar and title bar on Windows; on Linux the tarball ships a `.desktop` entry plus launcher icons; and on macOS the release archive is now a proper `RemotePackageInstallerNG.app` bundle (universal binary, icon in Finder, Dock and cmd-tab). The first-run note about unsigned downloads still applies on macOS.
+- **A refreshed README.** Real screenshots of the running app, release and platform badges, and a support section.
 
 ## Fixed
 
-- **A hand-edited queue file no longer produces broken rows.** Editing `queue.json` and accidentally leaving two entries with the same id made the second row render fine while its buttons (Retry, Remove, reorder…) silently acted on the *first* item — its state would never change no matter what you clicked. On startup the app now keeps the first entry of each id, drops the duplicates, and says so in the activity log.
-- **Renumbered entries can no longer corrupt the queue.** The counter at the top of the file is easy to leave behind when adding an entry by hand; the next package you added would then reuse an id already in use and take over that item's row. The counter is now verified against the entries and corrected on startup.
-- **Entries without files are marked invalid instead of failing silently.** An entry with no files would previously be sent to the console as an install with nothing to download. It now stays visible in the queue as "Invalid package" with the reason, so you can remove it knowing what happened.
-- **Repairs are visible, and untouched files stay untouched.** Every startup repair is logged to the activity panel — entries are never dropped silently. Files written by the app itself always load with zero changes.
+- **Status colors pass WCAG AA in both themes.** All status text (ok, warning, error, info, installing, neutral) now comes from one semantic palette with a light and a dark value each, and unit tests compute the real contrast ratios against the theme backgrounds so nothing ships below 4.5:1. The dim helper text in the dark theme was raised from about 2.3:1 to 4.7:1.
+- **Small windows no longer collide.** At the minimum window size (860x560) the queue toolbar, the top bar and the file-server strip now wrap onto a second row instead of painting over each other; an over-long console status chip truncates instead of running under the buttons; and the connect view scrolls when its content is taller than the panel, so the manual address field and the troubleshooting section are always reachable.
+- **Transfer readouts stay inside their column.** The transferred/total, speed and ETA line under each progress bar used to paint past the edge of its column and get clipped while a package was transferring; it now always fits.
+- **Escape closes the front-most window.** Settings, About, Software update and Add folder now close on Escape, and when several windows are stacked only the front one closes.
+- **Up/Down buttons are honest at the queue edges.** "Up" on the first row and "Down" on the last row render disabled with a hover explanation ("Already at the top of the queue") instead of looking clickable and doing nothing.
+- **Punctuation sweep.** The remaining em dashes in user-facing strings, activity-log lines and error messages are gone, and a source-hygiene test now fails the build if one reappears in a string literal.
 
 ## Internal
 
-- Test suite: 124 automated tests (was 100). The interface state logic — which buttons appear in which queue state, which rows the search shows, when the toolbar buttons enable and why, and the speed/size/time readouts — is now covered by automated tests without needing a GUI harness. All tests are self-contained against a mock console.
+- Test suite: 148 automated tests (was 124). New tests pin the contrast ratios, measure the real widget widths at the minimum window, cover Escape handling with stacked windows, and scan every source file for em dashes in string literals.
+- The repo gains a code of conduct, a contributing guide and issue/PR templates; DESIGN.md records the interface direction; MIGRATION.md now documents that data lives next to the executable.
 - `cargo fmt --check` and `cargo clippy -D warnings` clean; `unsafe` remains denied workspace-wide.
 
-**Install:** download the archive for your platform, extract it next to your packages, and run the executable — the app is portable and stores its settings in the same folder.
+**Install:** download the archive for your platform, extract it next to your packages, and run the executable. The app is portable and stores its settings in the same folder.
