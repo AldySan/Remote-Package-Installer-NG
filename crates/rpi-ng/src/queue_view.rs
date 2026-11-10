@@ -163,69 +163,94 @@ fn matches_search(needle: &str, item: &QueueItem) -> bool {
         .any(|hay| hay.to_lowercase().contains(needle))
 }
 
+/// Below this available width the toolbar wraps into two rows. Measured
+/// headlessly with real egui metrics (see the layout tests): the buttons
+/// need 575px in the worst case ("Queue running" label) and the right-aligned
+/// search + summary group 431px (6-digit counts), so a single row needs
+/// ~1015px. The 1120px default window stays single-row; the 860px minimum
+/// window wraps.
+const SINGLE_ROW_MIN_WIDTH: f32 = 1050.0;
+
+fn two_row_toolbar(available_width: f32) -> bool {
+    available_width < SINGLE_ROW_MIN_WIDTH
+}
+
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        let tb = ToolbarState::derive(
-            app.snapshot.engine_busy,
-            app.dialog.is_some(),
-            &app.snapshot.items,
-        );
-
-        if ui
-            .add_enabled(tb.can_add, egui::Button::new("Add PKG files…"))
-            .on_hover_text("Select one or more .pkg files")
-            .on_disabled_hover_text(tb.add_disabled_reason)
-            .clicked()
-        {
-            app.dialog = Some(dialogs::pick_pkg_files());
-        }
-        if ui
-            .add_enabled(tb.can_add, egui::Button::new("Add folder…"))
-            .on_hover_text("Scan a folder for packages")
-            .on_disabled_hover_text(tb.add_disabled_reason)
-            .clicked()
-        {
-            app.dialog = Some(dialogs::pick_folder());
-        }
-        ui.separator();
-
-        if ui
-            .add_enabled(tb.can_start, egui::Button::new(tb.start_label))
-            .on_hover_text("Install queued items in order")
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::Start);
-        }
-        if ui
-            .add_enabled(tb.can_pause, egui::Button::new("Pause"))
-            .on_hover_text("Pause the active console task and stop auto-advance")
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::Pause);
-        }
-        if ui
-            .add_enabled(tb.can_resume, egui::Button::new("Resume"))
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::Resume);
-        }
-        ui.separator();
-        if ui
-            .add_enabled(tb.can_clear_finished, egui::Button::new("Clear finished"))
-            .clicked()
-        {
-            app.send(rpi_ng_core::Command::ClearFinished);
-        }
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let summary = queue_summary(&app.snapshot.items);
-            ui.label(egui::RichText::new(summary).small().weak());
-            ui.add(
-                egui::TextEdit::singleline(&mut app.search)
-                    .hint_text("Search queue…")
-                    .desired_width(180.0),
-            );
+    let tb = ToolbarState::derive(
+        app.snapshot.engine_busy,
+        app.dialog.is_some(),
+        &app.snapshot.items,
+    );
+    if two_row_toolbar(ui.available_width()) {
+        // Narrow: buttons get their own row, search + summary the next one,
+        // so the right-aligned group can never paint over the buttons.
+        ui.horizontal(|ui| toolbar_buttons(app, ui, &tb));
+        ui.horizontal(|ui| toolbar_search(app, ui));
+    } else {
+        ui.horizontal(|ui| {
+            toolbar_buttons(app, ui, &tb);
+            toolbar_search(app, ui);
         });
+    }
+}
+
+fn toolbar_buttons(app: &mut App, ui: &mut egui::Ui, tb: &ToolbarState) {
+    if ui
+        .add_enabled(tb.can_add, egui::Button::new("Add PKG files…"))
+        .on_hover_text("Select one or more .pkg files")
+        .on_disabled_hover_text(tb.add_disabled_reason)
+        .clicked()
+    {
+        app.dialog = Some(dialogs::pick_pkg_files());
+    }
+    if ui
+        .add_enabled(tb.can_add, egui::Button::new("Add folder…"))
+        .on_hover_text("Scan a folder for packages")
+        .on_disabled_hover_text(tb.add_disabled_reason)
+        .clicked()
+    {
+        app.dialog = Some(dialogs::pick_folder());
+    }
+    ui.separator();
+
+    if ui
+        .add_enabled(tb.can_start, egui::Button::new(tb.start_label))
+        .on_hover_text("Install queued items in order")
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::Start);
+    }
+    if ui
+        .add_enabled(tb.can_pause, egui::Button::new("Pause"))
+        .on_hover_text("Pause the active console task and stop auto-advance")
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::Pause);
+    }
+    if ui
+        .add_enabled(tb.can_resume, egui::Button::new("Resume"))
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::Resume);
+    }
+    ui.separator();
+    if ui
+        .add_enabled(tb.can_clear_finished, egui::Button::new("Clear finished"))
+        .clicked()
+    {
+        app.send(rpi_ng_core::Command::ClearFinished);
+    }
+}
+
+fn toolbar_search(app: &mut App, ui: &mut egui::Ui) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let summary = queue_summary(&app.snapshot.items);
+        ui.label(egui::RichText::new(summary).small().weak());
+        ui.add(
+            egui::TextEdit::singleline(&mut app.search)
+                .hint_text("Search queue…")
+                .desired_width(180.0),
+        );
     });
 }
 
@@ -854,5 +879,95 @@ mod tests {
         assert_eq!(tb.add_disabled_reason, "Close the open file dialog first");
         // Start does not depend on the dialog.
         assert!(tb.can_start);
+    }
+
+    // -- toolbar layout (R-03: no collisions at the 860x560 minimum) -------
+
+    #[test]
+    fn toolbar_wraps_below_the_single_row_threshold() {
+        // Usable central-panel width at the 860x560 minimum window
+        // (8px panel margin each side) and at the 1120x760 default.
+        assert!(two_row_toolbar(844.0), "minimum window must wrap");
+        assert!(!two_row_toolbar(1104.0), "default window stays single-row");
+        assert!(!two_row_toolbar(SINGLE_ROW_MIN_WIDTH));
+        assert!(
+            !two_row_toolbar(1920.0 - 16.0),
+            "wide windows stay single-row"
+        );
+    }
+
+    /// Measured with real egui metrics (headless pass), not estimates: the
+    /// two wrapped rows must fit the minimum window, and the single-row
+    /// threshold must cover what the single row actually needs.
+    #[test]
+    fn toolbar_rows_fit_the_minimum_window_when_measured() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let min_usable = 860.0 - 2.0 * 8.0;
+            let buttons_row = ui
+                .horizontal(|ui| {
+                    for label in [
+                        "Add PKG files…",
+                        "Add folder…",
+                        "Queue running",
+                        "Pause",
+                        "Resume",
+                        "Clear finished",
+                    ] {
+                        let _ = ui.button(label);
+                    }
+                    ui.separator();
+                    ui.separator();
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE buttons_row {:.0}", buttons_row.width());
+            assert!(
+                buttons_row.width() <= min_usable,
+                "buttons row {:.0}px exceeds the {:.0}px minimum window",
+                buttons_row.width(),
+                min_usable
+            );
+
+            let search_row = ui
+                .horizontal(|ui| {
+                    // Worst-case summary text (6-digit counts in every slot).
+                    ui.label(
+                        egui::RichText::new(
+                            "999999 item(s) · 999999 done · 999999 active · 999999 failed",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    let mut search = String::new();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut search)
+                            .hint_text("Search queue…")
+                            .desired_width(180.0),
+                    );
+                    ui.min_rect()
+                })
+                .inner;
+            eprintln!("MEASURE search_row {:.0}", search_row.width());
+            assert!(
+                search_row.width() <= min_usable,
+                "search row {:.0}px exceeds the {:.0}px minimum window",
+                search_row.width(),
+                min_usable
+            );
+
+            // A single row needs both groups plus one inter-group gap; the
+            // threshold must cover it or the wrap would be pointless. The
+            // 30px headroom absorbs small metric drift across platforms.
+            let gap = ui.style().spacing.item_spacing.x;
+            let single_row_needs = buttons_row.width() + gap + search_row.width();
+            assert!(
+                SINGLE_ROW_MIN_WIDTH >= single_row_needs + 30.0,
+                "threshold {:.0}px leaves <30px over the {:.0}px single-row need",
+                SINGLE_ROW_MIN_WIDTH,
+                single_row_needs
+            );
+        });
+        output.drop_without_applying_deltas();
     }
 }
