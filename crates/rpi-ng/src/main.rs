@@ -8,6 +8,7 @@ mod connect_view;
 mod dialogs;
 mod fmt;
 mod log_view;
+mod palette;
 mod queue_view;
 mod servercheck;
 mod settings_view;
