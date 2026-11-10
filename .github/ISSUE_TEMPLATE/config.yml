@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: How to use the app
+    url: https://github.com/AldySan/Remote-Package-Installer-NG#how-to-use
+    about: Usage questions are usually answered in the README's How to use and Common problems sections.
+  - name: Support the project
+    url: https://ko-fi.com/aldysan
+    about: If the app helped you, you can support development on Ko-fi. Optional, always appreciated.
