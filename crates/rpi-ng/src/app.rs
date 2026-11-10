@@ -469,36 +469,26 @@ impl eframe::App for App {
 
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.strong("Remote Package Installer NG");
-                ui.separator();
-                self.console_status_chip(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("About").clicked() {
-                        self.show_about = !self.show_about;
-                    }
-                    let log_label = if self.show_log {
-                        "Hide log"
-                    } else {
-                        "Show log"
-                    };
-                    if ui.button(log_label).clicked() {
-                        self.show_log = !self.show_log;
-                    }
-                    if ui.button("Settings…").clicked() {
-                        self.show_settings = !self.show_settings;
-                        // Seed the draft from the (engine-kept-fresh) settings
-                        // on open; discard it on toggle-off.
-                        self.settings_draft = if self.show_settings {
-                            Some(self.settings.clone())
-                        } else {
-                            None
-                        };
-                    }
+            if two_row_top_bar(ui.available_width()) {
+                // Narrow: the identity row and the controls row split, the
+                // same deal the queue toolbar gets; a long console chip can
+                // no longer collide with the right-aligned buttons.
+                ui.horizontal(|ui| {
+                    ui.strong("Remote Package Installer NG");
                     ui.separator();
-                    self.update_controls(ui);
+                    self.console_status_chip(ui);
                 });
-            });
+                ui.horizontal(|ui| {
+                    self.top_bar_controls(ui);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.strong("Remote Package Installer NG");
+                    ui.separator();
+                    self.console_status_chip(ui);
+                    self.top_bar_controls(ui);
+                });
+            }
             ui.add_space(4.0);
         });
 
@@ -568,6 +558,34 @@ impl eframe::App for App {
 }
 
 impl App {
+    fn top_bar_controls(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("About").clicked() {
+                self.show_about = !self.show_about;
+            }
+            let log_label = if self.show_log {
+                "Hide log"
+            } else {
+                "Show log"
+            };
+            if ui.button(log_label).clicked() {
+                self.show_log = !self.show_log;
+            }
+            if ui.button("Settings…").clicked() {
+                self.show_settings = !self.show_settings;
+                // Seed the draft from the (engine-kept-fresh) settings
+                // on open; discard it on toggle-off.
+                self.settings_draft = if self.show_settings {
+                    Some(self.settings.clone())
+                } else {
+                    None
+                };
+            }
+            ui.separator();
+            self.update_controls(ui);
+        });
+    }
+
     fn console_status_chip(&mut self, ui: &mut egui::Ui) {
         let (color, label) = {
             let p = palette::Palette::of(ui);
@@ -595,7 +613,14 @@ impl App {
             };
             (color, label)
         };
-        ui.colored_label(color, format!("● {label}"));
+        let full = format!("● {label}");
+        let chip = ui
+            .scope(|ui| {
+                ui.set_max_width(MAX_CHIP_WIDTH);
+                ui.add(egui::Label::new(egui::RichText::new(full.clone()).color(color)).truncate())
+            })
+            .inner;
+        chip.on_hover_text(full);
         if self.connected()
             && ui
                 .small_button("Switch")
@@ -651,6 +676,24 @@ pub(crate) fn escape_closes_top_window(ctx: &egui::Context, layer: Option<egui::
         ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     }
     is_top
+}
+
+/// Below this available width the top bar wraps into two rows (identity,
+/// then controls). Measured headlessly with real egui metrics: the worst
+/// controls row ("Check for updates" plus the up-to-date checkmark) needs
+/// ~364px, the title plus separator ~229px, and the chip is capped at
+/// [`MAX_CHIP_WIDTH`], so a single row needs ~930px. The 1120px default
+/// window stays single-row; the 860px minimum wraps.
+const TOP_BAR_SINGLE_ROW_MIN_WIDTH: f32 = 960.0;
+
+/// Long backend identities ("Remote PKG Installer NextGen 0.0.3
+/// (192.168.1.42:12800)") and incompatibility reasons must not push the
+/// chip into the right-aligned controls: the label truncates at this many
+/// pixels and the full text stays one hover away.
+const MAX_CHIP_WIDTH: f32 = 320.0;
+
+fn two_row_top_bar(available_width: f32) -> bool {
+    available_width < TOP_BAR_SINGLE_ROW_MIN_WIDTH
 }
 
 pub(crate) fn queue_summary(items: &[QueueItem]) -> String {
@@ -780,6 +823,86 @@ mod tests {
             assert!(!escape_closes_top_window(ctx, front));
             // A window that did not render (None layer) must never close.
             assert!(!escape_closes_top_window(ctx, None));
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    // -- top bar fits the minimum window (R-03) -----------------------------
+
+    #[test]
+    fn top_bar_wraps_below_its_threshold() {
+        assert!(two_row_top_bar(844.0), "minimum window must wrap");
+        assert!(!two_row_top_bar(1104.0), "default window stays single-row");
+        assert!(!two_row_top_bar(TOP_BAR_SINGLE_ROW_MIN_WIDTH));
+    }
+
+    /// Measured with real egui metrics, not estimates: the wrapped rows must
+    /// fit the 860x560 minimum window, and the single-row threshold must
+    /// cover what the single row actually needs (worst-case controls label,
+    /// truncated chip).
+    #[test]
+    fn top_bar_rows_fit_the_minimum_window_when_measured() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let min_usable = 860.0 - 2.0 * 8.0;
+
+            let controls = ui
+                .horizontal(|ui| {
+                    let _ = ui.button("About");
+                    let _ = ui.button("Hide log");
+                    let _ = ui.button("Settings…");
+                    ui.separator();
+                    // Worst-case update-controls label.
+                    let _ = ui.button("Check for updates ✓");
+                    ui.min_rect()
+                })
+                .inner;
+            assert!(
+                controls.width() <= min_usable,
+                "controls row {:.0}px exceeds the {:.0}px minimum window",
+                controls.width(),
+                min_usable
+            );
+
+            let long_label = "● Incompatible: the address answered, but the response did not \
+                 look like a Remote Package Installer app, so the connection was refused \
+                 before any package was sent";
+            let identity = ui
+                .horizontal(|ui| {
+                    ui.strong("Remote Package Installer NG");
+                    ui.separator();
+                    let chip = ui
+                        .scope(|ui| {
+                            ui.set_max_width(MAX_CHIP_WIDTH);
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(long_label).weak()).truncate(),
+                            )
+                        })
+                        .inner;
+                    assert!(
+                        chip.rect.width() <= MAX_CHIP_WIDTH + 1.0,
+                        "chip {:.0}px exceeds its {:.0}px budget",
+                        chip.rect.width(),
+                        MAX_CHIP_WIDTH
+                    );
+                    ui.min_rect()
+                })
+                .inner;
+            assert!(
+                identity.width() <= min_usable,
+                "identity row {:.0}px exceeds the {:.0}px minimum window",
+                identity.width(),
+                min_usable
+            );
+
+            let gap = ui.style().spacing.item_spacing.x;
+            let single_row_needs = identity.width() + gap + controls.width();
+            assert!(
+                TOP_BAR_SINGLE_ROW_MIN_WIDTH >= single_row_needs + 30.0,
+                "threshold {:.0}px leaves <30px over the {:.0}px single-row need",
+                TOP_BAR_SINGLE_ROW_MIN_WIDTH,
+                single_row_needs
+            );
         });
         output.drop_without_applying_deltas();
     }
