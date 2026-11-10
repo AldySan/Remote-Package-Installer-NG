@@ -72,12 +72,12 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
                         if ui
                             .add_enabled(server_bind.is_some(), egui::Button::new(label))
                             .on_disabled_hover_text(
-                                "The file server starts when you connect to a console — \
+                                "The file server starts when you connect to a console; \
                                  connect first, then check",
                             )
                             .on_hover_text(
                                 "Test whether the app's own file server is answering on this \
-                                 computer — if it is OK but the console still cannot download, the \
+                                 computer. If it is OK but the console still cannot download, the \
                                  block is between the two machines (firewall / network)",
                             )
                             .clicked()
@@ -182,7 +182,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, open: &mut bool) {
             );
             ui.label(
                 egui::RichText::new(
-                    "The update check only asks GitHub for the latest release tag — \
+                    "The update check only asks GitHub for the latest release tag; \
                      nothing else is sent.",
                 )
                 .weak(),

@@ -270,9 +270,9 @@ fn server_strip(app: &mut App, ui: &mut egui::Ui) {
         ui.monospace(&server.base_url);
         ui.separator();
         ui.colored_label(p.ok, format!("↑ {}", fmt::mbps(server.tx_bps)))
-            .on_hover_text("Out — what the console is downloading from you (smoothed)");
+            .on_hover_text("Out: what the console is downloading from you (smoothed)");
         ui.colored_label(p.info, format!("↓ {}", fmt::mbps(server.rx_bps)))
-            .on_hover_text("In — request/control traffic (tiny by design)");
+            .on_hover_text("In: request/control traffic (tiny by design)");
         let totals = format!(
             "sent {} · received {}",
             fmt::bytes(server.tx_total),
@@ -291,7 +291,7 @@ fn server_strip(app: &mut App, ui: &mut egui::Ui) {
                 .button(label)
                 .on_hover_text(
                     "Test whether the app's own file server is answering on this \
-                     computer — if it is OK but the console still cannot download, the \
+                     computer. If it is OK but the console still cannot download, the \
                      block is between the two machines (firewall / network)",
                 )
                 .clicked()
@@ -317,16 +317,15 @@ fn check_chip(ui: &mut egui::Ui, result: &ServerCheck) {
     match result {
         ServerCheck::Responded(code) => {
             ui.colored_label(p.ok, format!("OK (HTTP {code})"))
-                .on_hover_text("The server answered the probe — it is running normally");
+                .on_hover_text("The server answered the probe: it is running normally");
         }
         ServerCheck::NotRunning => {
-            ui.colored_label(p.neutral, "not running").on_hover_text(
-                "Nothing is listening — the server starts with a console connection",
-            );
+            ui.colored_label(p.neutral, "not running")
+                .on_hover_text("Nothing is listening: the server starts with a console connection");
         }
         ServerCheck::NoAnswer => {
             ui.colored_label(p.warn, "no answer").on_hover_text(
-                "The port accepted the connection but never replied — a firewall or antivirus may be intercepting it",
+                "The port accepted the connection but never replied: a firewall or antivirus may be intercepting it",
             );
         }
         ServerCheck::Error(e) => {
@@ -381,7 +380,7 @@ fn item_row(app: &App, ui: &mut egui::Ui, item: &QueueItem) {
     let primary = item.primary_part();
     let title = primary
         .map(|p| p.display_title())
-        .unwrap_or_else(|| "—".into());
+        .unwrap_or_else(|| "No name".into());
     let size = fmt::bytes(item.total_size());
 
     ui.horizontal(|ui| {
