@@ -59,8 +59,8 @@ impl LoadRepairs {
         let mut out = Vec::new();
         if !self.dropped_duplicate_ids.is_empty() {
             out.push(format!(
-                "queue.json contained duplicate item ids {} — kept the first entry of each; \
-                 hand-edited entries can collide and make rows unmanageable",
+                "queue.json contained duplicate item ids {} (kept the first entry of each; \
+                 hand-edited entries can collide and make rows unmanageable)",
                 self.dropped_duplicate_ids
                     .iter()
                     .map(|id| id.to_string())
@@ -70,20 +70,20 @@ impl LoadRepairs {
         }
         if self.next_item_repaired {
             out.push(
-                "queue.json next_item was behind an existing id — raised past the highest id \
+                "queue.json next_item was behind an existing id; raised past the highest id \
                  so new entries cannot collide"
                     .into(),
             );
         }
         if self.next_part_repaired {
             out.push(
-                "queue.json next_part was behind an existing part id — raised past the highest id"
+                "queue.json next_part was behind an existing part id; raised past the highest id"
                     .into(),
             );
         }
         if !self.invalidated_empty_items.is_empty() {
             out.push(format!(
-                "queue.json items {} had no files — marked invalid; remove them from the queue",
+                "queue.json items {} had no files (marked invalid); remove them from the queue",
                 self.invalidated_empty_items
                     .iter()
                     .map(|id| id.to_string())
