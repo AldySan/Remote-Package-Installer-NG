@@ -352,7 +352,7 @@ impl EngineInner {
             if let Some(it) = self.queue.get_mut(*id) {
                 it.state = ItemState::Unknown;
                 it.error = Some(
-                    "Connection closed while this item was in flight — the outcome is unknown; reconnect to re-attach, then verify on the console".into(),
+                    "Connection closed while this item was in flight: the outcome is unknown; reconnect to re-attach, then verify on the console".into(),
                 );
                 it.updated_at = unix_ms();
             }
@@ -578,7 +578,7 @@ impl EngineInner {
                 self.persist_queue();
                 self.log(
                     LogLevel::Warn,
-                    format!("Cancelled item #{id}; remote stop of task {task_id} was best-effort — verify on the console if it still appears"),
+                    format!("Cancelled item #{id}; remote stop of task {task_id} was best-effort; verify on the console if it still appears"),
                 );
             }
         } else if let Some(item) = self.queue.get_mut(id)
@@ -605,14 +605,14 @@ impl EngineInner {
                     self.stop_remote(task_id, job_id).await;
                     self.log(
                         LogLevel::Warn,
-                        format!("Cancelled item #{id}; remote stop was best-effort — verify on the console if it still appears"),
+                        format!("Cancelled item #{id}; remote stop was best-effort; verify on the console if it still appears"),
                     );
                 } else {
                     self.log(
                         LogLevel::Warn,
                         format!(
                             "Cancelled item #{id}; its console task belongs to another \
-                             console — connect to that one to stop it remotely"
+                             console; connect to that one to stop it remotely"
                         ),
                     );
                 }
@@ -653,7 +653,7 @@ impl EngineInner {
                 if files.len() >= MAX_WALK_FILES {
                     self.log(
                         LogLevel::Warn,
-                        format!("Scan capped at {MAX_WALK_FILES} files — some packages may be missing; add the rest from another folder"),
+                        format!("Scan capped at {MAX_WALK_FILES} files (some packages may be missing); add the rest from another folder"),
                     );
                 }
                 let (added, skipped) = self.queue.add_paths(files);
@@ -716,7 +716,7 @@ impl EngineInner {
                             self.log(
                                 LogLevel::Warn,
                                 format!(
-                                    "Switched consoles with {parked} in-flight item(s) — outcome unknown; reconnect to the previous console to re-attach"
+                                    "Switched consoles with {parked} in-flight item(s): outcome unknown; reconnect to the previous console to re-attach"
                                 ),
                             );
                         }
@@ -796,7 +796,7 @@ impl EngineInner {
                                     LogLevel::Info,
                                     format!(
                                         "Item #{item}: console answered after the disconnect \
-                                         (task {task_id}) — id kept for a later re-attach"
+                                         (task {task_id}); id kept for a later re-attach"
                                     ),
                                 );
                             } else if task_id > 0 {
@@ -812,7 +812,7 @@ impl EngineInner {
                                     LogLevel::Warn,
                                     format!(
                                         "Item #{item}: cancelled while the request was in \
-                                         flight — remote stop of task {task_id} was \
+                                         flight; remote stop of task {task_id} was \
                                          best-effort on the console it was sent to; verify \
                                          there if it still appears"
                                     ),
@@ -861,7 +861,7 @@ impl EngineInner {
                         self.persist_queue();
                         self.log(
                             LogLevel::Info,
-                            format!("Console accepted item #{item} (task {task_id}) — downloading"),
+                            format!("Console accepted item #{item} (task {task_id}); downloading"),
                         );
                         // A pause may have arrived while the request was in
                         // flight (there was no task id to pause yet): apply it now.
@@ -887,14 +887,14 @@ impl EngineInner {
                             if let Some(it) = self.queue.get_mut(item) {
                                 it.state = ItemState::Unknown;
                                 it.error = Some(
-                                "The console accepted the install but did not return a task id (fork dialect) — verify on the console, then mark completed or retry".into(),
+                                "The console accepted the install but did not return a task id (fork dialect); verify on the console, then mark completed or retry".into(),
                             );
                                 it.updated_at = unix_ms();
                             }
                             self.persist_queue();
                             self.log(
                             LogLevel::Warn,
-                            format!("Item #{item}: install accepted without a task id — outcome unknown"),
+                            format!("Item #{item}: install accepted without a task id; outcome unknown"),
                         );
                             self.maybe_start_next().await;
                             return;
@@ -913,7 +913,7 @@ impl EngineInner {
                                 if let Some(it) = self.queue.get_mut(item) {
                                     it.state = ItemState::Failed;
                                     it.error = Some(
-                                        "the local file server is not running — reconnect, then retry"
+                                        "the local file server is not running; reconnect, then retry"
                                             .into(),
                                     );
                                     it.updated_at = unix_ms();
@@ -922,7 +922,7 @@ impl EngineInner {
                                 self.log(
                                     LogLevel::Error,
                                     format!(
-                                        "Item #{item}: cannot rebuild package URLs — the local file server is not running",
+                                        "Item #{item}: cannot rebuild package URLs: the local file server is not running",
                                     ),
                                 );
                                 self.on_transfer_failure().await;
@@ -1010,7 +1010,7 @@ impl EngineInner {
                 .collect();
             if cids.len() > 1 && cids.windows(2).any(|w| w[0] != w[1]) {
                 item.error = Some(
-                    "Multipart pieces have different content ids — grouping looks wrong".into(),
+                    "Multipart pieces have different content ids; grouping looks wrong".into(),
                 );
                 if matches!(item.state, ItemState::Queued | ItemState::Preparing) {
                     item.state = ItemState::Invalid;
@@ -1023,7 +1023,7 @@ impl EngineInner {
                 let expected: Vec<u32> = (0..idxs.len() as u32).collect();
                 if idxs != expected {
                     item.error =
-                        Some("Multipart pieces are not consecutive — a part seems missing".into());
+                        Some("Multipart pieces are not consecutive; a part seems missing".into());
                     if matches!(item.state, ItemState::Queued | ItemState::Preparing) {
                         item.state = ItemState::Invalid;
                     }
@@ -1038,7 +1038,7 @@ impl EngineInner {
             {
                 item.state = ItemState::Invalid;
                 item.error = Some(format!(
-                    "Duplicate content id — same package is already queued (item #{_first})"
+                    "Duplicate content id: same package is already queued (item #{_first})"
                 ));
                 self.log(
                     LogLevel::Warn,
@@ -1151,7 +1151,7 @@ impl EngineInner {
             let Some(urls) = self.rebuild_urls(id) else {
                 self.log(
                     LogLevel::Error,
-                    "Could not register package files with the local server — install cannot proceed",
+                    "Could not register package files with the local server; install cannot proceed",
                 );
                 return;
             };
@@ -1295,7 +1295,7 @@ impl EngineInner {
                     if self.copy_phase_stalls == 30 {
                         self.log(
                             LogLevel::Warn,
-                            "Transfer finished but the console does not report the copy phase yet — keep the console awake and check its notifications",
+                            "Transfer finished but the console does not report the copy phase yet; keep the console awake and check its notifications",
                         );
                     }
                 } else if it.state != ItemState::Paused {
@@ -1325,7 +1325,7 @@ impl EngineInner {
             if let Some(it) = self.queue.get_mut(item) {
                 it.state = ItemState::Unknown;
                 it.error = Some(
-                    "The console no longer knows this task (it may have completed or been removed) — verify on the console, then retry or mark completed"
+                    "The console no longer knows this task (it may have completed or been removed); verify on the console, then retry or mark completed"
                         .into(),
                 );
             }
@@ -1380,7 +1380,7 @@ impl EngineInner {
             if let Some(it) = self.queue.get_mut(item) {
                 it.state = ItemState::Unknown;
                 it.error = Some(
-                    "The console no longer lists this job (its app may have restarted) — verify on the console, then retry or mark completed"
+                    "The console no longer lists this job (its app may have restarted); verify on the console, then retry or mark completed"
                         .into(),
                 );
             }
@@ -1497,14 +1497,14 @@ impl EngineInner {
         else {
             self.log(
                 LogLevel::Warn,
-                format!("Item #{id} has no console task to resume — use Retry instead"),
+                format!("Item #{id} has no console task to resume; use Retry instead"),
             );
             return;
         };
         let Some(task_id) = task_id else {
             self.log(
                 LogLevel::Warn,
-                format!("Item #{id} has no console task to resume — use Retry instead"),
+                format!("Item #{id} has no console task to resume; use Retry instead"),
             );
             return;
         };
@@ -1514,7 +1514,7 @@ impl EngineInner {
             self.log(
                 LogLevel::Warn,
                 format!(
-                    "Item #{id} belongs to a different console — reconnect to that one to \
+                    "Item #{id} belongs to a different console; reconnect to that one to \
                      resume it"
                 ),
             );
@@ -1524,7 +1524,7 @@ impl EngineInner {
         if !is_monitored && self.active.is_some() {
             self.log(
                 LogLevel::Warn,
-                "Another item is already being monitored — wait for it to finish first",
+                "Another item is already being monitored; wait for it to finish first",
             );
             return;
         }
@@ -1533,7 +1533,7 @@ impl EngineInner {
             // single-active-task slot (v0.0.5 fix).
             self.log(
                 LogLevel::Warn,
-                "An install request is still in flight — wait for the console to answer first",
+                "An install request is still in flight; wait for the console to answer first",
             );
             return;
         }
@@ -1661,7 +1661,7 @@ impl EngineInner {
                 if bind_ip.is_unspecified() {
                     self.log(
                         LogLevel::Warn,
-                        "No local interface matched the console subnet — bound to all interfaces. If the console cannot download, check your firewall.",
+                        "No local interface matched the console subnet; bound to all interfaces. If the console cannot download, check your firewall.",
                     );
                 }
                 self.server = Some(s);
@@ -1669,7 +1669,7 @@ impl EngineInner {
             None => {
                 self.log(
                     LogLevel::Error,
-                    format!("Could not start the local file server on {bind}: {} — installs cannot proceed", last_err.map(|e| e.to_string()).unwrap_or_default()),
+                    format!("Could not start the local file server on {bind}: {}; installs cannot proceed", last_err.map(|e| e.to_string()).unwrap_or_default()),
                 );
             }
         }
@@ -1759,7 +1759,7 @@ impl EngineInner {
             let Some(job) = found else {
                 if let Some(it) = self.queue.get_mut(id) {
                     it.error = Some(
-                        "The console does not report this job anymore — verify on the console, then retry or mark completed"
+                        "The console does not report this job anymore; verify on the console, then retry or mark completed"
                             .into(),
                     );
                 }
@@ -1964,7 +1964,7 @@ impl EngineInner {
             // Task unknown to the console: leave as Unknown with a hint.
             if let Some(it) = self.queue.get_mut(id) {
                 it.error = Some(
-                    "The console does not report this task anymore — verify on the console, then retry or mark completed".into(),
+                    "The console does not report this task anymore; verify on the console, then retry or mark completed".into(),
                 );
             }
         }
