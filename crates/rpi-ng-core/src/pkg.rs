@@ -20,7 +20,7 @@ use crate::{
     sfo::{Sfo, SfoValue},
 };
 
-pub const PKG_MAGIC: [u8; 4] = [0x7F, b'P', b'K', b'G'];
+pub const PKG_MAGIC: [u8; 4] = [0x7F, b'C', b'N', b'T'];
 pub const HEADER_SIZE: usize = 0x2000;
 pub const ENTRY_SIZE: usize = 0x20;
 pub const ENTRY_ID_PARAM_SFO: u32 = 0x1000;
