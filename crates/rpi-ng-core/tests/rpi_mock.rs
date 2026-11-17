@@ -681,7 +681,11 @@ async fn install_and_progress_with_broken_hex_dialect() {
     // Serve a small file so the prerequisite fetch succeeds.
     let tmp = tempfile::tempdir().unwrap();
     let pkg_path = tmp.path().join("game.pkg");
-    build_fake_pkg(tmp.path(), "game.pkg", "UP0001-CUSA07777_00-MOCKGAME00000000");
+    build_fake_pkg(
+        tmp.path(),
+        "game.pkg",
+        "UP0001-CUSA07777_00-MOCKGAME00000000",
+    );
     let server = rpi_ng_core::fileserver::FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
@@ -815,7 +819,11 @@ async fn serve_pkg_url() -> (
 ) {
     let tmp = tempfile::tempdir().unwrap();
     let pkg_path = tmp.path().join("game.pkg");
-    build_fake_pkg(tmp.path(), "game.pkg", "UP0001-CUSA07777_00-MOCKGAME00000000");
+    build_fake_pkg(
+        tmp.path(),
+        "game.pkg",
+        "UP0001-CUSA07777_00-MOCKGAME00000000",
+    );
     let server = rpi_ng_core::fileserver::FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
