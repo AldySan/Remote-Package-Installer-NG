@@ -681,10 +681,11 @@ async fn install_and_progress_with_broken_hex_dialect() {
     // Serve a small file so the prerequisite fetch succeeds.
     let tmp = tempfile::tempdir().unwrap();
     let pkg_path = tmp.path().join("game.pkg");
-    build_fake_pkg(
+    build_fake_pkg_with_size(
         tmp.path(),
         "game.pkg",
         "UP0001-CUSA07777_00-MOCKGAME00000000",
+        256 * 1024,
     );
     let server = rpi_ng_core::fileserver::FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -819,10 +820,11 @@ async fn serve_pkg_url() -> (
 ) {
     let tmp = tempfile::tempdir().unwrap();
     let pkg_path = tmp.path().join("game.pkg");
-    build_fake_pkg(
+    build_fake_pkg_with_size(
         tmp.path(),
         "game.pkg",
         "UP0001-CUSA07777_00-MOCKGAME00000000",
+        256 * 1024,
     );
     let server = rpi_ng_core::fileserver::FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -931,6 +933,15 @@ async fn v2_already_installed_reports_task_id_minus_one() {
 // ---------------------------------------------------------------------------
 
 fn build_fake_pkg(dir: &std::path::Path, name: &str, content_id: &str) -> std::path::PathBuf {
+    build_fake_pkg_with_size(dir, name, content_id, 512 * 1024)
+}
+
+fn build_fake_pkg_with_size(
+    dir: &std::path::Path,
+    name: &str,
+    content_id: &str,
+    data_len: usize,
+) -> std::path::PathBuf {
     use std::io::Write;
     // Minimal SFO.
     let entries: Vec<(&str, &str)> = vec![
@@ -988,7 +999,6 @@ fn build_fake_pkg(dir: &std::path::Path, name: &str, content_id: &str) -> std::p
     header[0x40..0x40 + content_id.len()].copy_from_slice(content_id.as_bytes());
     header[0x74..0x78].copy_from_slice(&0x1Au32.to_be_bytes());
 
-    let data_len = 512 * 1024usize;
     let path = dir.join(name);
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(&header).unwrap();
