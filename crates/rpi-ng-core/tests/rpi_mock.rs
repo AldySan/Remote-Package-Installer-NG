@@ -970,16 +970,16 @@ fn build_fake_pkg_with_size(
     }
     let mut sfo = Vec::new();
     sfo.extend_from_slice(b"\0PSF");
-    sfo.extend_from_slice(&1u32.to_be_bytes());
-    sfo.extend_from_slice(&(key_base as u32).to_be_bytes());
-    sfo.extend_from_slice(&((key_base + keys.len()) as u32).to_be_bytes());
-    sfo.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    sfo.extend_from_slice(&1u32.to_le_bytes());
+    sfo.extend_from_slice(&(key_base as u32).to_le_bytes());
+    sfo.extend_from_slice(&((key_base + keys.len()) as u32).to_le_bytes());
+    sfo.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (k, f, u, m, v) in index {
-        sfo.extend_from_slice(&k.to_be_bytes());
-        sfo.extend_from_slice(&f.to_be_bytes());
-        sfo.extend_from_slice(&u.to_be_bytes());
-        sfo.extend_from_slice(&m.to_be_bytes());
-        sfo.extend_from_slice(&v.to_be_bytes());
+        sfo.extend_from_slice(&k.to_le_bytes());
+        sfo.extend_from_slice(&f.to_le_bytes());
+        sfo.extend_from_slice(&u.to_le_bytes());
+        sfo.extend_from_slice(&m.to_le_bytes());
+        sfo.extend_from_slice(&v.to_le_bytes());
     }
     sfo.extend_from_slice(&keys);
     sfo.extend_from_slice(&values);
