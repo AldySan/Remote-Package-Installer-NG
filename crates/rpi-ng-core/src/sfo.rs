@@ -1,6 +1,6 @@
 //! PARAM.SFO parser (format used by PlayStation packages).
 //!
-//! Layout (all big-endian), mirrored from the upstream payload's `sfo.c` and
+//! Layout (all multi-byte integers little-endian, as in PARAM.SFO),
 //! hardened with explicit bounds checks:
 //!
 //! ```text
@@ -52,12 +52,12 @@ pub enum SfoError {
     UnterminatedKey { key: usize },
 }
 
-fn be_u16(b: &[u8], off: usize) -> u16 {
-    u16::from_be_bytes([b[off], b[off + 1]])
+fn le_u16(b: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([b[off], b[off + 1]])
 }
 
-fn be_u32(b: &[u8], off: usize) -> u32 {
-    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+fn le_u32(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
 impl Sfo {
@@ -70,9 +70,9 @@ impl Sfo {
         if &buf[0..4] != SFO_MAGIC {
             return Err(SfoError::BadMagic);
         }
-        let key_table = be_u32(buf, 0x08) as usize;
-        let value_table = be_u32(buf, 0x0C) as usize;
-        let entry_count = be_u32(buf, 0x10) as usize;
+        let key_table = le_u32(buf, 0x08) as usize;
+        let value_table = le_u32(buf, 0x0C) as usize;
+        let entry_count = le_u32(buf, 0x10) as usize;
         if entry_count > MAX_ENTRIES {
             return Err(SfoError::TooManyEntries(entry_count, MAX_ENTRIES));
         }
@@ -88,10 +88,10 @@ impl Sfo {
         let mut entries = BTreeMap::new();
         for i in 0..entry_count {
             let e = 0x14 + i * 0x10;
-            let key_offset = be_u16(buf, e) as usize;
-            let data_format = be_u16(buf, e + 2);
-            let used_size = be_u32(buf, e + 4) as usize;
-            let value_offset = be_u32(buf, e + 0x0C) as usize;
+            let key_offset = le_u16(buf, e) as usize;
+            let data_format = le_u16(buf, e + 2);
+            let used_size = le_u32(buf, e + 4) as usize;
+            let value_offset = le_u32(buf, e + 0x0C) as usize;
 
             let key_abs = key_table
                 .checked_add(key_offset)
@@ -157,7 +157,7 @@ impl Sfo {
                     // panic the parse thread (v0.0.5 fix; a truncated SFO
                     // triggered exactly this). Skip such entries instead.
                     if value_abs + 4 <= buf.len() {
-                        SfoValue::U32(be_u32(buf, value_abs))
+                        SfoValue::U32(le_u32(buf, value_abs))
                     } else {
                         continue;
                     }
@@ -165,7 +165,7 @@ impl Sfo {
                 0x0004 => {
                     // Special/int8-ish format; treat as u32 read when possible.
                     if value_abs + 4 <= buf.len() {
-                        SfoValue::U32(be_u32(buf, value_abs))
+                        SfoValue::U32(le_u32(buf, value_abs))
                     } else {
                         SfoValue::U32(buf[value_abs] as u32)
                     }
@@ -219,16 +219,16 @@ mod tests {
         let value_table = key_table + 2; // "X\0"
         let mut buf = Vec::new();
         buf.extend_from_slice(SFO_MAGIC);
-        buf.extend_from_slice(&1u32.to_be_bytes());
-        buf.extend_from_slice(&(key_table as u32).to_be_bytes());
-        buf.extend_from_slice(&(value_table as u32).to_be_bytes());
-        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&(key_table as u32).to_le_bytes());
+        buf.extend_from_slice(&(value_table as u32).to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
         // entry: key_off 0, fmt, used, max = used, value_off 0
-        buf.extend_from_slice(&0u16.to_be_bytes());
-        buf.extend_from_slice(&fmt.to_be_bytes());
-        buf.extend_from_slice(&used.to_be_bytes());
-        buf.extend_from_slice(&used.to_be_bytes());
-        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&fmt.to_le_bytes());
+        buf.extend_from_slice(&used.to_le_bytes());
+        buf.extend_from_slice(&used.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(b"X\0");
         buf.extend_from_slice(value_bytes);
         buf
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn wellformed_u32_entry_still_parses() {
-        let buf = sfo_with_entry(0x0404, 4, &0x1122_3344u32.to_be_bytes());
+        let buf = sfo_with_entry(0x0404, 4, &0x1122_3344u32.to_le_bytes());
         let sfo = Sfo::parse(&buf).unwrap();
         assert_eq!(sfo.get_u32("X"), Some(0x1122_3344));
     }
