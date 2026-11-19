@@ -681,7 +681,12 @@ async fn install_and_progress_with_broken_hex_dialect() {
     // Serve a small file so the prerequisite fetch succeeds.
     let tmp = tempfile::tempdir().unwrap();
     let pkg_path = tmp.path().join("game.pkg");
-    std::fs::write(&pkg_path, vec![0u8; 256 * 1024]).unwrap();
+    build_fake_pkg_with_size(
+        tmp.path(),
+        "game.pkg",
+        "UP0001-CUSA07777_00-MOCKGAME00000000",
+        256 * 1024,
+    );
     let server = rpi_ng_core::fileserver::FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
@@ -815,7 +820,12 @@ async fn serve_pkg_url() -> (
 ) {
     let tmp = tempfile::tempdir().unwrap();
     let pkg_path = tmp.path().join("game.pkg");
-    std::fs::write(&pkg_path, vec![0u8; 256 * 1024]).unwrap();
+    build_fake_pkg_with_size(
+        tmp.path(),
+        "game.pkg",
+        "UP0001-CUSA07777_00-MOCKGAME00000000",
+        256 * 1024,
+    );
     let server = rpi_ng_core::fileserver::FileServer::start(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
@@ -923,6 +933,15 @@ async fn v2_already_installed_reports_task_id_minus_one() {
 // ---------------------------------------------------------------------------
 
 fn build_fake_pkg(dir: &std::path::Path, name: &str, content_id: &str) -> std::path::PathBuf {
+    build_fake_pkg_with_size(dir, name, content_id, 512 * 1024)
+}
+
+fn build_fake_pkg_with_size(
+    dir: &std::path::Path,
+    name: &str,
+    content_id: &str,
+    data_len: usize,
+) -> std::path::PathBuf {
     use std::io::Write;
     // Minimal SFO.
     let entries: Vec<(&str, &str)> = vec![
@@ -951,16 +970,16 @@ fn build_fake_pkg(dir: &std::path::Path, name: &str, content_id: &str) -> std::p
     }
     let mut sfo = Vec::new();
     sfo.extend_from_slice(b"\0PSF");
-    sfo.extend_from_slice(&1u32.to_be_bytes());
-    sfo.extend_from_slice(&(key_base as u32).to_be_bytes());
-    sfo.extend_from_slice(&((key_base + keys.len()) as u32).to_be_bytes());
-    sfo.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    sfo.extend_from_slice(&1u32.to_le_bytes());
+    sfo.extend_from_slice(&(key_base as u32).to_le_bytes());
+    sfo.extend_from_slice(&((key_base + keys.len()) as u32).to_le_bytes());
+    sfo.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (k, f, u, m, v) in index {
-        sfo.extend_from_slice(&k.to_be_bytes());
-        sfo.extend_from_slice(&f.to_be_bytes());
-        sfo.extend_from_slice(&u.to_be_bytes());
-        sfo.extend_from_slice(&m.to_be_bytes());
-        sfo.extend_from_slice(&v.to_be_bytes());
+        sfo.extend_from_slice(&k.to_le_bytes());
+        sfo.extend_from_slice(&f.to_le_bytes());
+        sfo.extend_from_slice(&u.to_le_bytes());
+        sfo.extend_from_slice(&m.to_le_bytes());
+        sfo.extend_from_slice(&v.to_le_bytes());
     }
     sfo.extend_from_slice(&keys);
     sfo.extend_from_slice(&values);
@@ -974,13 +993,12 @@ fn build_fake_pkg(dir: &std::path::Path, name: &str, content_id: &str) -> std::p
     entry_table.extend_from_slice(&[0u8; 0x0C]);
 
     let mut header = vec![0u8; 0x2000];
-    header[0..4].copy_from_slice(&[0x7F, b'P', b'K', b'G']);
+    header[0..4].copy_from_slice(&[0x7F, b'C', b'N', b'T']);
     header[0x10..0x14].copy_from_slice(&1u32.to_be_bytes());
     header[0x18..0x1C].copy_from_slice(&entry_table_offset.to_be_bytes());
     header[0x40..0x40 + content_id.len()].copy_from_slice(content_id.as_bytes());
     header[0x74..0x78].copy_from_slice(&0x1Au32.to_be_bytes());
 
-    let data_len = 512 * 1024usize;
     let path = dir.join(name);
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(&header).unwrap();
