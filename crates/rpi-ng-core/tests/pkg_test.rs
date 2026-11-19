@@ -32,16 +32,16 @@ fn build_sfo(entries: &[(&str, &str)]) -> Vec<u8> {
 
     let mut out = Vec::new();
     out.extend_from_slice(b"\0PSF");
-    out.extend_from_slice(&1u32.to_be_bytes());
-    out.extend_from_slice(&(key_base as u32).to_be_bytes());
-    out.extend_from_slice(&((key_base + keys.len()) as u32).to_be_bytes());
-    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&(key_base as u32).to_le_bytes());
+    out.extend_from_slice(&((key_base + keys.len()) as u32).to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (k, f, u, m, v) in index {
-        out.extend_from_slice(&k.to_be_bytes());
-        out.extend_from_slice(&f.to_be_bytes());
-        out.extend_from_slice(&u.to_be_bytes());
-        out.extend_from_slice(&m.to_be_bytes());
-        out.extend_from_slice(&v.to_be_bytes());
+        out.extend_from_slice(&k.to_le_bytes());
+        out.extend_from_slice(&f.to_le_bytes());
+        out.extend_from_slice(&u.to_le_bytes());
+        out.extend_from_slice(&m.to_le_bytes());
+        out.extend_from_slice(&v.to_le_bytes());
     }
     out.extend_from_slice(&keys);
     out.extend_from_slice(&values);
@@ -68,7 +68,8 @@ fn build_pkg(
     entry_table.extend_from_slice(&[0u8; 0x0C]); // trailing padding to 0x20
 
     let mut header = vec![0u8; 0x2000];
-    header[0..4].copy_from_slice(&pkg::PKG_MAGIC);
+    // Independent canonical PS4 PKG magic (do not derive fixture from parser constant).
+    header[0..4].copy_from_slice(&[0x7F, b'C', b'N', b'T']);
     header[0x10..0x14].copy_from_slice(&1u32.to_be_bytes()); // entry_count
     header[0x18..0x1C].copy_from_slice(&entry_table_offset.to_be_bytes());
     let cid = content_id.as_bytes();
@@ -132,6 +133,22 @@ fn detects_patch_flag() {
     std::fs::write(&path, &buf).unwrap();
     let info = pkg::parse_pkg_file(&path).unwrap();
     assert!(info.is_patch);
+}
+
+#[test]
+fn accepts_canonical_ps4_pkg_magic() {
+    assert_eq!(pkg::PKG_MAGIC, [0x7F, b'C', b'N', b'T']);
+}
+
+#[test]
+fn rejects_legacy_non_ps4_magic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("legacy.pkg");
+    let mut header = vec![0u8; 0x2000];
+    header[0..4].copy_from_slice(&[0x7F, b'P', b'K', b'G']);
+    std::fs::write(&path, &header).unwrap();
+    let err = pkg::parse_pkg_file(&path).unwrap_err();
+    assert!(matches!(err, pkg::PkgError::BadMagic));
 }
 
 #[test]
